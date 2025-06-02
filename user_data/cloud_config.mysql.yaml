@@ -1,0 +1,429 @@
+#cloud-config
+output: { all : '| tee -a /var/log/cloud-init-output.log' }
+repo_update: true
+repo_upgrade: all
+package_upgrade: true
+package_reboot_if_required: true
+
+cloud_init_modules:
+  - migrator
+  - bootcmd
+  - write-files
+  - growpart
+  - resizefs
+  - disk_setup
+  - mounts
+  - set_hostname
+  - update_hostname
+  - update_etc_hosts
+  - ca-certs
+  - rsyslog
+  - users-groups
+  - ssh
+
+# AL2023
+packages:
+  - bash-completion
+  - e2fsprogs
+  - ec2-utils
+  - git-core
+  - vim-enhanced
+  - awscli
+  - nvme-cli
+  - jq
+  - htop
+  - docker
+  - cronie
+  - pv
+
+write_files:
+  - path: /opt/scripts/ebs-mount.sh
+    permissions: '0700'
+    content: |
+      #!/usr/bin/env bash
+      set -euo pipefail
+
+      device_name=$${device_name:-$1}
+      mountpoint=$${mountpoint:-$2}
+      service_name=$${service_name:-$3}
+
+      export AWS_DEFAULT_REGION="$(ec2-metadata --availability-zone | awk '{print $2}' | rev | cut -c2- | rev)"
+      AVAILABILITY_ZONE="$(ec2-metadata --availability-zone | awk '{print $2}')"
+      INSTANCE_ROLE="$(aws ec2 describe-tags --filters Name=resource-id,Values=$(ec2-metadata --instance-id | awk '{print $2}') | jq -r '.Tags[] | select(.Key == "Role") | .Value')"
+      echo "AVAILABILITY_ZONE: $AVAILABILITY_ZONE"
+      echo "INSTANCE_ROLE: $INSTANCE_ROLE"
+
+      while true; do
+          i=1
+          while UNATTACHED_VOLUME_ID="$(aws ec2 describe-volumes --filters Name=tag:Service,Values=$service_name Name=tag:AutoAttachGroup,Values=$INSTANCE_ROLE Name=availability-zone,Values=$AVAILABILITY_ZONE | jq -r '.Volumes[] | select(.Attachments | length == 0) | .VolumeId' | shuf -n 1)";
+          do
+            if [[ -n $UNATTACHED_VOLUME_ID ]] || [[ $i -gt 3 ]]; then break; fi
+            echo [$i/3] UNATTACHED_VOLUME_ID is empty, waiting for 2 minutes
+            sleep 120 && i=$((i+1))
+            continue
+          done
+
+          echo "UNATTACHED_VOLUME_ID: $UNATTACHED_VOLUME_ID"
+
+          aws ec2 attach-volume --device "$device_name" --instance-id=$(ec2-metadata --instance-id | awk '{print $2}') --volume-id $UNATTACHED_VOLUME_ID
+          if [ "$?" != "0" ]; then
+              sleep 10
+              continue
+          fi
+
+          sleep 30
+
+          ATTACHMENTS_COUNT="$(aws ec2 describe-volumes --filters Name=volume-id,Values=$UNATTACHED_VOLUME_ID | jq -r '.Volumes[0].Attachments | length')"
+          if [ "$ATTACHMENTS_COUNT" != "0" ]; then break; fi
+      done
+      echo 'Waiting for 30 seconds for the disk to become mountable...'
+      sleep 30
+
+      mkdir -vp $mountpoint
+      export MOUNTED_DEVICE_NAME=$(lsblk -ip --noheadings | awk '{print $1 " " ($7? "MOUNTEDPART" : "") }' | sed ':a;N;$!ba;s/\n`/ /g' | grep -v MOUNTEDPART | grep -v /dev/nvme0n1)
+      echo $MOUNTED_DEVICE_NAME
+      if mount -o defaults -t ext4 $device_name $mountpoint; then
+          echo 'Successfully mounted existing disk'
+      else
+          echo 'Trying to mount a fresh disk'
+          mkfs.ext4 -m 0 -F -E lazy_itable_init=0,lazy_journal_init=0,discard $device_name
+          mount -o defaults -t ext4 $device_name $mountpoint && echo 'Successfully mounted a fresh disk'
+      fi
+      echo "$device_name $mountpoint ext4 defaults,nofail 0 2" | tee -a /etc/fstab
+  - path: /opt/scripts/get-docker-extras.sh
+    permissions: '0700'
+    content: |
+      #!/usr/bin/env bash
+      set -eu -o pipefail
+
+      # install old docker-compose
+      yum install -y libxcrypt-compat
+      version=1.29.2
+      os=$(uname -s)
+      arch=$(uname -m)
+
+      ln -s /usr/share/bash-completion/docker /etc/bash_completion.d/docker
+
+      # install new compose plugin
+      version=2.32.0
+      plugins_dir=/usr/local/lib/docker/cli-plugins
+      mkdir -p $plugins_dir
+      curl -SL https://github.com/docker/compose/releases/download/v$version/docker-compose-$${os,,}-$arch -o $plugins_dir/docker-compose
+      chmod +x $plugins_dir/docker-compose
+
+  - path: /opt/scripts/mysql-init.sh
+    permissions: '0700'
+    content: |
+      #!/usr/bin/env bash
+      set -euo pipefail
+
+      # Set default paths
+      MOUNTPOINT=$${mountpoint:-$1}
+      MYSQLDIR=$MOUNTPOINT/mysql
+      DATADIR=$MYSQLDIR/data
+
+      ## Create dirs
+      if [ ! -d $MYSQLDIR ]; then
+        mkdir -p $MYSQLDIR/data
+        chown -R mysql:mysql $MYSQLDIR
+      fi
+
+      # Get MySQL password from SSM
+      SSM_PARAM="${ssm_db_credentials}"
+      export AWS_DEFAULT_REGION="$(ec2-metadata --availability-zone | awk '{print $2}' | rev | cut -c2- | rev)"
+      CONNECTION_STRING=$(aws ssm get-parameter --name "$SSM_PARAM" --with-decryption --query 'Parameter.Value' --output text)
+      DB_PASSWORD=$(echo "$CONNECTION_STRING" | awk -F'[:@]' '{print $3}')
+      DB_PORT=$(echo "$CONNECTION_STRING" | awk -F'[:/]' '{print $6}')
+
+      # Check if the password retrieval was successful
+      if [ -z "$DB_PASSWORD" ]; then
+        echo "Failed to retrieve password from AWS SSM Parameter Store"
+        exit 1
+      fi
+
+      # Update my.cnf
+      CNF=/etc/my.cnf.d/mariadb-server.cnf
+      sed -i \
+        -e "s#\(datadir=\).*#\1$DATADIR#" \
+        -e "/datadir=/i \
+      bind-address=0.0.0.0\n\
+      port=${db_port}\n\
+      ssl-ca=/etc/ssl/mysql/ca.pem\n\
+      ssl-cert=/etc/ssl/mysql/server-cert.pem\n\
+      ssl-key=/etc/ssl/mysql/server-key.pem" \
+      $CNF
+
+      # Setup ssl
+      SSL_DIR=${ssl_certs_dest}
+      mkdir -p "$SSL_DIR"
+      CERTS=( ${ssl_certs} )
+      for cert in "$${CERTS[@]}"
+      do
+        aws ssm get-parameter --name ${ssl_certs_ssm_prefix}/$cert --with-decryption --query 'Parameter.Value' --output text > $SSL_DIR/$cert
+      done
+
+      chown -R mysql:mysql $SSL_DIR
+      chmod 600 $SSL_DIR/*
+
+      # Create log directory
+      mkdir -p /var/log/mysql
+      chown -R mysql:mysql /var/log/mysql
+
+      # Reload systemd
+      systemctl daemon-reload
+
+      # Start and enable MySQL
+      systemctl enable --now mariadb
+
+      # Set root password and create user/database
+      if [ ! -f "$DATADIR/.mysql_initialized" ]; then
+        # Secure the MySQL installation
+        mysql --user=root <<EOF
+      -- Set root password
+      ALTER USER 'root'@'localhost' IDENTIFIED BY '$DB_PASSWORD';
+      -- Create application database
+      CREATE DATABASE IF NOT EXISTS ${db_name};
+      -- Create application user and grant privileges
+      CREATE USER IF NOT EXISTS '${db_username}'@'%' IDENTIFIED BY '$DB_PASSWORD';
+      GRANT ALL ON ${db_name}.* TO '${db_username}'@'%';
+      -- Allow remote connections
+      CREATE USER IF NOT EXISTS '${db_username}'@'localhost' IDENTIFIED BY '$DB_PASSWORD';
+      GRANT ALL ON ${db_name}.* TO '${db_username}'@'localhost';
+      -- Remove anonymous users
+      DELETE FROM mysql.user WHERE User='';
+      -- Disallow root login from remote hosts
+      DELETE FROM mysql.user WHERE User='root' AND Host NOT IN ('localhost', '127.0.0.1', '::1');
+      -- Drop the test database if it exists
+      DROP DATABASE IF EXISTS test;
+      -- Remove privileges on test databases
+      DELETE FROM mysql.db WHERE Db='test' OR Db='test\\_%';
+      -- Apply changes
+      FLUSH PRIVILEGES;
+      EOF
+        # Mark as initialized
+        touch $DATADIR/.mysql_initialized
+        echo "MySQL has been initialized with application user and database."
+      fi
+
+  - path: /opt/scripts/mysql.sh
+    permissions: '0700'
+    content: |
+      #!/usr/bin/env bash
+      set -euo pipefail
+
+      # Get MySQL password from SSM
+      SSM_PARAM="${ssm_db_credentials}"
+      export AWS_DEFAULT_REGION="$(ec2-metadata --availability-zone | awk '{print $2}' | rev | cut -c2- | rev)"
+      CONNECTION_STRING="$${1:-$(aws ssm get-parameter --name $SSM_PARAM --with-decryption --query 'Parameter.Value' --output text)}"
+
+      # Remove the mysql:// prefix
+      CONNECTION_STRING="$${CONNECTION_STRING#mysql://}"
+
+      # Extract user
+      user="$${CONNECTION_STRING%%:*}"
+      rest="$${CONNECTION_STRING#*:}"
+
+      # Extract password
+      pass="$${rest%%@*}"
+      rest="$${rest#*@}"
+
+      # Extract host
+      host="$${rest%%:*}"
+      rest="$${rest#*:}"
+
+      # Extract port
+      port="$${rest%%/*}"
+
+      # Extract database name
+      dbname="$${rest#*/}"
+
+      # Connect to MySQL using extracted parameters
+      mariadb -h "$host" -P "$port" -u "$user" -p"$pass" "$dbname"
+  - path: /opt/scripts/mysql-backup.sh
+    permissions: '0700'
+    content: |
+      #!/usr/bin/env bash
+      set -euo pipefail
+
+      # Configuration
+      SERVICE="${service_name}"
+      DB_USER="${db_backup_user}"
+      SSM_PARAM="${ssm_db_credentials}"
+      S3_BUCKET="${db_backup_bucket}"
+      BACKUP_DIR="${db_backup_dir}"
+      TIMESTAMP=$(date +'%Y/%m/%d')
+
+      export AWS_DEFAULT_REGION="$(ec2-metadata --availability-zone | awk '{print $2}' | rev | cut -c2- | rev)"
+
+      # Fetch connection string from AWS SSM Parameter Store
+      echo "Fetching connection string from AWS SSM Parameter Store..."
+      CONNECTION_STRING=$(aws ssm get-parameter --name "$SSM_PARAM" --with-decryption --query 'Parameter.Value' --output text)
+
+      # Extract password from the connection string
+      PASSWORD=$(echo "$CONNECTION_STRING" | awk -F'[:@]' '{print $3}')
+
+      # Check if the password retrieval was successful
+      if [ -z "$PASSWORD" ]; then
+        echo "Error: failed to retrieve password from SSM Parameter Store."
+        exit 1
+      fi
+
+      # Create a temporary directory for backups
+      mkdir -p "$BACKUP_DIR"
+
+      # Create backup filename with timestamp
+      BACKUP_FILE="mysql_all_databases_$(date +%Y%m%d_%H%M%S).sql.gz"
+
+      # Backup all databases
+      echo "Creating backup of all MySQL databases..."
+      mysqldump --user=root --password="$PASSWORD" --all-databases --single-transaction --quick --lock-tables=false | gzip > "$BACKUP_DIR/$BACKUP_FILE"
+
+      # Check if backup was successful
+      if [ $? -ne 0 ]; then
+        echo "Error while creating backup."
+        exit 1
+      fi
+
+      # Upload backup to S3
+      S3_PATH="s3://$S3_BUCKET/$SERVICE/$TIMESTAMP/$BACKUP_FILE"
+      echo "Uploading backup to $S3_PATH..."
+      aws s3 cp "$BACKUP_DIR/$BACKUP_FILE" "$S3_PATH"
+
+      # Check if upload was successful
+      if [ $? -eq 0 ]; then
+        echo "Backup successfully uploaded to $S3_PATH"
+      else
+        echo "Error uploading backup to S3"
+        exit 1
+      fi
+
+      # Clean up temporary backup files
+      echo "Cleaning up local backup files..."
+      rm -f "$BACKUP_DIR/$BACKUP_FILE"
+
+      echo "Backup process completed."
+
+  - path: /etc/systemd/system/mysql-backup.service
+    permissions: '0644'
+    content: |
+      [Unit]
+      Description=MySQL Database Backup
+
+      [Service]
+      Type=oneshot
+      ExecStart=/opt/scripts/mysql-backup.sh
+
+  - path: /etc/systemd/system/mysql-backup.timer
+    permissions: '0644'
+    content: |
+      [Unit]
+      Description=MySQL Backup Timer (8:00 - 10:00 AM Window)
+
+      [Timer]
+      OnCalendar=*-*-* 08:00:00
+      RandomizedDelaySec=2h
+      Persistent=true
+
+      [Install]
+      WantedBy=timers.target
+
+  - path: /opt/scripts/deploy-app-in-docker.sh
+    permissions: '0700'
+    content: |
+      #!/usr/bin/env bash
+      set -euo pipefail
+
+      WORKDIR=$${WORKDIR:-/srv/code}
+      GIT_REPOSITORY=$${GIT_REPOSITORY:-${git_repository}}
+      DEFAULT_BRANCH=$${DEFAULT_BRANCH:-main}
+
+      setup_ssh_config() {
+        local repo_deploy_key=$(aws ssm get-parameter --name "${ssm_repo_deploy_key}" --with-decryption --query 'Parameter.Value' --output text)
+        mkdir -p ~/.ssh
+        chmod 700 ~/.ssh
+        echo -e "$repo_deploy_key" > ~/.ssh/id_rsa
+        chmod 600 ~/.ssh/id_rsa
+        ssh-keyscan -t rsa $(echo "$GIT_REPOSITORY" | grep -oP '(?<=@)[^:]+') > ~/.ssh/known_hosts
+      }
+
+      sync_sources() {
+        # clone repo if WORKDIR is not a valid git repo
+        git -C $WORKDIR rev-parse 2>/dev/null || git clone $GIT_REPOSITORY $WORKDIR
+
+        cd $WORKDIR
+
+        # always hard reset and clean before any checkout to avoid checkout errors
+        git reset --hard
+        git clean -fd
+
+        git fetch --all
+
+        # determine commit/branch to reset to
+        COMMIT="origin/$DEFAULT_BRANCH"
+        [[ -n "$${COMMIT_HASH:-}" ]] && COMMIT="$COMMIT_HASH"
+
+        # force reset working tree and index to exact commit state
+        git reset --hard "$COMMIT"
+      }
+
+      configure_host() {
+        [[ -s .deploy/ec2-configure-host.sh ]] && .deploy/ec2-configure-host.sh
+      }
+
+      prepare_docker_aws() {
+        ECR_REGISTRY=$(aws ecr get-authorization-token --query authorizationData[0].proxyEndpoint --output text | cut -d/ -f3)
+        aws ecr get-login-password | docker login --username AWS --password-stdin $ECR_REGISTRY
+      }
+
+      prepare_docker_overrides() {
+        if [[ -s docker-compose.tests.override.yml && -s docker-compose.frontend.override.yml ]]; then
+          docker run --rm -v "$PWD":/workdir mikefarah/yq ea '. as $item ireduce ({}; . * $item)' \
+            docker-compose.tests.override.yml docker-compose.frontend.override.yml > docker-compose.override.yml
+        fi
+      }
+
+      setup_env_file() {
+        [[ -s .env ]] && mv .env .env.bak
+
+        ENV_FILES="${ssm_env_files}"
+        for env_file in $ENV_FILES; do
+          aws ssm get-parameter --name "$env_file" --with-decryption --query 'Parameter.Value' --output text >> .env
+        done
+      }
+
+      run_docker() {
+        docker system prune -f
+        docker compose pull -q
+        docker compose build -q
+        docker compose up -d
+      }
+
+      setup_ssh_config
+      sync_sources
+      configure_host
+      prepare_docker_aws
+      prepare_docker_overrides
+      setup_env_file
+      run_docker
+runcmd:
+  # install aws ssm agent
+  - yum install -y https://s3.amazonaws.com/ec2-downloads-windows/SSMAgent/latest/linux_amd64/amazon-ssm-agent.rpm
+  - systemctl enable --now --no-block amazon-ssm-agent
+  # dist-upgrade
+  - dnf upgrade -y --refresh --releasever=latest
+  # mounting ebs disks
+  - /opt/scripts/ebs-mount.sh ${data_device_name} ${data_mountpoint} ${data_service_name}
+  - /opt/scripts/ebs-mount.sh ${backup_device_name} ${backup_mountpoint} ${backup_service_name}
+  # download docker-compose
+  - systemctl enable --now --no-block --force docker
+  - /opt/scripts/get-docker-extras.sh
+  - systemctl disable --now --no-block --force docker
+  # initialize mysql server (separated from "packages:" block)
+  - yum install -y mariadb105-server
+  - /opt/scripts/mysql-init.sh ${data_mountpoint}
+  - systemctl enable --now --no-block --force mariadb
+  # enable mysql backup
+  - systemctl daemon-reload
+  - systemctl enable --now --no-block mysql-backup.timer
+  # deploy application
+  - /opt/scripts/deploy-app-in-docker.sh
