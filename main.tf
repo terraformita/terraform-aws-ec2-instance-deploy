@@ -283,35 +283,45 @@ resource "aws_ssm_parameter" "db_credentials" {
 
 locals {
   replacements = {
-    "{db_url}" = local.db_credentials
-    "{domain}" = var.deployment.domain_name
+    "{db_url}"      = local.db_credentials
+    "{domain_name}" = var.deployment.domain_name
   }
 
   # Replaces all placeholders like {db_url} in each extra env var value.
   # Uses a predefined map of replacements to substitute the placeholders.
   # Outputs final KEY=value strings for use in the SSM parameter content.
   # Example:
-  # { "BASE_URL" = "{domain}" } → { "{domain}" = var.deployment.domain_name } → { "BASE_URL" = "http://example.com" }
+  # { "BASE_URL" = "{domain_name}" } → { "{domain_name}" = var.deployment.domain_name } → { "BASE_URL" = "http://example.com" }
   resolved_extra_env_vars_auto = {
-    for k, v in var.extra_env_vars_auto : k => (
-      join("", [
-        for repl_key, repl_val in local.replacements :
-        replace(v, repl_key, repl_val)
-      ])
+    for key, raw_val in var.extra_env_vars_auto : key => (
+      element([
+        for i in range(length(local.replacements)) : (
+          replace(
+            i == 0 ? raw_val : replace(
+              raw_val,
+              element(keys(local.replacements), 0),
+              element(values(local.replacements), 0)
+            ),
+            element(keys(local.replacements), i),
+            element(values(local.replacements), i)
+          )
+        )
+      ], length(local.replacements) - 1)
     )
   }
 
   extra_env_vars_auto = join("\n", [
-    for k, v in local.resolved_extra_env_vars_auto : "${k}=${v}"
+    for k, v in local.resolved_extra_env_vars_auto : "${k}=\"${v}\""
   ])
 }
+
 resource "aws_ssm_parameter" "ec2_env_file_auto" {
   name  = "/${var.name_prefix}/ec2/env_file_auto"
   type  = "SecureString"
   value = <<EOF
-DOMAIN=${var.deployment.domain_name}
-EMAIL=${var.deployment.ssl_email}
-DB_CREDENTIALS=${local.db_credentials}
+DOMAIN="${var.deployment.domain_name}"
+EMAIL="${var.deployment.ssl_email}"
+DB_CREDENTIALS="${local.db_credentials}"
 ${local.extra_env_vars_auto}
 EOF
 
