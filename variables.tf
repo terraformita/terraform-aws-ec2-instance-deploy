@@ -105,3 +105,20 @@ variable "tags" {
   type        = map(string)
   default     = {}
 }
+
+variable "extra_env_vars_auto" {
+  description = "Additional key-value map to be appended to the ec2_env_file_auto SSM parameter."
+  type        = map(string)
+  default     = {}
+}
+
+variable "root_block_device" {
+  description = "Root block device configuration for the EC2 instance. Tags will be merged with local EC2 instance tags."
+  type = object({
+    encrypted   = optional(bool, true)
+    volume_type = optional(string, "gp3")
+    volume_size = optional(number, 25)
+    tags        = optional(map(string), {})
+  })
+  default = {}
+}

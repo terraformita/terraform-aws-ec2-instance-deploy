@@ -15,12 +15,12 @@ locals {
     http_put_response_hop_limit = 3
   }
   root_block_device = [
-    {
-      encrypted   = true
-      volume_type = "gp3"
-      volume_size = 25
-      tags        = local.ec2_instance_tags
-    }
+    merge(
+      var.root_block_device,
+      {
+        tags = merge(local.ec2_instance_tags, var.root_block_device.tags)
+      }
+    )
   ]
 
   name = "${var.name_prefix}-ec2"
@@ -275,6 +275,30 @@ resource "aws_ssm_parameter" "db_credentials" {
   tags = var.tags
 }
 
+locals {
+  replacements = {
+    "{db_url}" = local.db_credentials
+    "{domain}" = var.deployment.domain_name
+  }
+
+  # Replaces all placeholders like {db_url} in each extra env var value.
+  # Uses a predefined map of replacements to substitute the placeholders.
+  # Outputs final KEY=value strings for use in the SSM parameter content.
+  # Example:
+  # { "BASE_URL" = "{domain}" } → { "{domain}" = var.deployment.domain_name } → { "BASE_URL" = "http://example.com" }
+  resolved_extra_env_vars_auto = {
+    for k, v in var.extra_env_vars_auto : k => (
+      join("", [
+        for repl_key, repl_val in local.replacements :
+        replace(v, repl_key, repl_val)
+      ])
+    )
+  }
+
+  extra_env_vars_auto = join("\n", [
+    for k, v in local.resolved_extra_env_vars_auto : "${k}=${v}"
+  ])
+}
 resource "aws_ssm_parameter" "ec2_env_file_auto" {
   name  = "/${var.name_prefix}/ec2/env_file_auto"
   type  = "SecureString"
@@ -282,6 +306,7 @@ resource "aws_ssm_parameter" "ec2_env_file_auto" {
 DOMAIN=${var.deployment.domain_name}
 EMAIL=${var.deployment.ssl_email}
 DB_CREDENTIALS=${local.db_credentials}
+${local.extra_env_vars_auto}
 EOF
 
   tags = var.tags
@@ -299,8 +324,8 @@ data "aws_ssm_parameter" "params" {
   name     = each.value
 }
 
-
 locals {
+  # Collects all relevant SSM parameter ARNs used in the module
   all_ssm_parameters = concat(
     var.ssl_config.enabled ? [for k in local.ssl_certs_keys : aws_ssm_parameter.ssl_certs[k].arn] : [],
     [
