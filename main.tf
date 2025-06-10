@@ -41,8 +41,14 @@ locals {
     postgres = 5432
   }
 
-  service_name = var.database.engine
-  db_port      = var.database.port != null ? var.database.port : local.default_db_ports[var.database.engine]
+  default_ssl_certs_dest = {
+    mysql    = "/etc/ssl/mysql"
+    postgres = "/etc/ssl/postgres"
+  }
+
+  service_name   = var.database.engine
+  db_port        = var.database.port != null ? var.database.port : local.default_db_ports[var.database.engine]
+  ssl_certs_dest = local.default_ssl_certs_dest[var.database.engine]
 
   storage = {
     data = merge({
@@ -444,7 +450,7 @@ locals {
 
         ssl_certs            = var.ssl_config.enabled ? join(" ", local.ssl_certs_keys) : ""
         ssl_certs_ssm_prefix = "/${var.name_prefix}/ec2"
-        ssl_certs_dest       = "/etc/ssl/mysql"
+        ssl_certs_dest       = local.ssl_certs_dest
       }
     )
   )

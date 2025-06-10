@@ -148,9 +148,9 @@ write_files:
         -e "/datadir=/i \
       bind-address=0.0.0.0\n\
       port=${db_port}\n\
-      ssl-ca=/etc/ssl/mysql/ca.pem\n\
-      ssl-cert=/etc/ssl/mysql/server-cert.pem\n\
-      ssl-key=/etc/ssl/mysql/server-key.pem" \
+      ssl-ca=${ssl_certs_dest}/ca.pem\n\
+      ssl-cert=${ssl_certs_dest}/server-cert.pem\n\
+      ssl-key=${ssl_certs_dest}/server-key.pem" \
       $CNF
 
       # Setup ssl
