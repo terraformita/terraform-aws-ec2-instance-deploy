@@ -168,9 +168,27 @@ write_files:
       # Set the server configuration
       sed -i "s/^#\(listen_addresses = \)\('localhost'\)/\1'*'/" $DATADIR/postgresql.conf
 
-      # Allow network authorization for user postgres
-      echo "host    all             postgres        ${db_allowed_network}           scram-sha-256" >> $DATADIR/pg_hba.conf
-      echo "host    ${db_name}             ${db_username}        ${db_allowed_network}           scram-sha-256" >> $DATADIR/pg_hba.conf
+      # Setup ssl certificates
+      SSL_DIR=${ssl_certs_dest}
+      mkdir -p "$SSL_DIR"
+      CERTS=( ${ssl_certs} )
+      for cert in "$${CERTS[@]}"
+      do
+        aws ssm get-parameter --name ${ssl_certs_ssm_prefix}/$cert --with-decryption --query 'Parameter.Value' --output text > $SSL_DIR/$cert
+      done
+
+      chown -R postgres:postgres $SSL_DIR
+      chmod 600 $SSL_DIR/*
+
+      # SSL configuration
+      echo "ssl = on" >> $DATADIR/postgresql.conf
+      echo "ssl_ca_file = '${ssl_certs_dest}/ca.pem'" >> $DATADIR/postgresql.conf
+      echo "ssl_cert_file = '${ssl_certs_dest}/server-cert.pem'" >> $DATADIR/postgresql.conf
+      echo "ssl_key_file = '${ssl_certs_dest}/server-key.pem'" >> $DATADIR/postgresql.conf
+
+      # Allow SSL-only network authorization for user postgres
+      echo "hostssl all             postgres        ${db_allowed_network}           scram-sha-256" >> $DATADIR/pg_hba.conf
+      echo "hostssl ${db_name}             ${db_username}        ${db_allowed_network}           scram-sha-256" >> $DATADIR/pg_hba.conf
 
       # start postgresql server
       systemctl enable --now --no-block --force postgresql@${stage}
