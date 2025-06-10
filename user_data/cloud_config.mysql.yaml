@@ -367,7 +367,7 @@ write_files:
       }
 
       configure_host() {
-        [[ -s .deploy/ec2-configure-host.sh ]] && .deploy/ec2-configure-host.sh
+        [[ -s .deploy/ec2-configure-host.sh ]] && .deploy/ec2-configure-host.sh || return 0
       }
 
       prepare_docker_aws() {
