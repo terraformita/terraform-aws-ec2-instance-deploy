@@ -189,6 +189,7 @@ write_files:
       # Allow SSL-only network authorization for user postgres
       echo "hostssl all             postgres        ${db_allowed_network}           scram-sha-256" >> $DATADIR/pg_hba.conf
       echo "hostssl ${db_name}             ${db_username}        ${db_allowed_network}           scram-sha-256" >> $DATADIR/pg_hba.conf
+      echo "hostssl ${db_name}             ${db_username}        172.16.0.0/12           scram-sha-256" >> $DATADIR/pg_hba.conf
 
       # start postgresql server
       systemctl enable --now --no-block --force postgresql@${stage}
