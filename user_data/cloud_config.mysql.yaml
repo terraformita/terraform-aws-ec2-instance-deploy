@@ -376,14 +376,14 @@ write_files:
       }
 
       prepare_docker_overrides() {
-        [[ -z "$${OVERRIDES:-}" ]] && { echo "OVERRIDES not set, skipping"; return 0; }
+        [[ -z "$${COMPOSE_OVERRIDES:-}" ]] && { echo "COMPOSE_OVERRIDES not set, skipping"; return 0; }
 
-        for file in $${OVERRIDES[@]}; do
+        for file in $${COMPOSE_OVERRIDES[@]}; do
           [[ ! -s "$file" ]] && { echo "File $file not found, skipping"; return 0; }
         done
 
         docker run --rm -v "$PWD":/workdir mikefarah/yq ea '. as $item ireduce ({}; . * $item)' \
-          $${OVERRIDES[@]} > docker-compose.override.yml
+          $${COMPOSE_OVERRIDES[@]} > docker-compose.override.yml
       }
 
       setup_env_file() {

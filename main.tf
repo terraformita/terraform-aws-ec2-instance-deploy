@@ -421,6 +421,10 @@ parameters:
     description: "Optional Git commit hash to checkout (fallback to main if not set)"
     default: ""
     type: String
+  ComposeOverrides:
+    description: "These docker compose override files were be used to build docker-compose.override.yml"
+    default: ""
+    type: String
 mainSteps:
   - action: "aws:runShellScript"
     name: "RunDeploy"
@@ -428,6 +432,7 @@ mainSteps:
       runCommand:
         - |
           export COMMIT_HASH={{ CommitHash }}
+          export COMPOSE_OVERRIDES="{{ ComposeOverrides }}"
           /opt/scripts/deploy-app-in-docker.sh
 EOF
 }
