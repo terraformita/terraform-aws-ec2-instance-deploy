@@ -408,10 +408,14 @@ write_files:
       }
 
       prepare_docker_overrides() {
-        if [[ -s docker-compose.tests.override.yml && -s docker-compose.frontend.override.yml ]]; then
-          docker run --rm -v "$PWD":/workdir mikefarah/yq ea '. as $item ireduce ({}; . * $item)' \
-            docker-compose.tests.override.yml docker-compose.frontend.override.yml > docker-compose.override.yml
-        fi
+        [[ -z "$${OVERRIDES:-}" ]] && { echo "OVERRIDES not set, skipping"; return 0; }
+
+        for file in $${OVERRIDES[@]}; do
+          [[ ! -s "$file" ]] && { echo "File $file not found, skipping"; return 0; }
+        done
+
+        docker run --rm -v "$PWD":/workdir mikefarah/yq ea '. as $item ireduce ({}; . * $item)' \
+          $${OVERRIDES[@]} > docker-compose.override.yml
       }
 
       setup_env_file() {
@@ -425,7 +429,7 @@ write_files:
 
       run_docker() {
         docker system prune -f
-        docker compose pull -q
+        docker compose pull --ignore-pull-failures -q
         docker compose build -q
         docker compose up -d
       }
