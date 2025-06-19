@@ -168,9 +168,28 @@ write_files:
       # Set the server configuration
       sed -i "s/^#\(listen_addresses = \)\('localhost'\)/\1'*'/" $DATADIR/postgresql.conf
 
-      # Allow network authorization for user postgres
-      echo "host    all             postgres        ${db_allowed_network}           scram-sha-256" >> $DATADIR/pg_hba.conf
-      echo "host    ${db_name}             ${db_username}        ${db_allowed_network}           scram-sha-256" >> $DATADIR/pg_hba.conf
+      # Setup ssl certificates
+      SSL_DIR=${ssl_certs_dest}
+      mkdir -p "$SSL_DIR"
+      CERTS=( ${ssl_certs} )
+      for cert in "$${CERTS[@]}"
+      do
+        aws ssm get-parameter --name ${ssl_certs_ssm_prefix}/$cert --with-decryption --query 'Parameter.Value' --output text > $SSL_DIR/$cert
+      done
+
+      chown -R postgres:postgres $SSL_DIR
+      chmod 600 $SSL_DIR/*
+
+      # SSL configuration
+      echo "ssl = on" >> $DATADIR/postgresql.conf
+      echo "ssl_ca_file = '${ssl_certs_dest}/ca.pem'" >> $DATADIR/postgresql.conf
+      echo "ssl_cert_file = '${ssl_certs_dest}/server-cert.pem'" >> $DATADIR/postgresql.conf
+      echo "ssl_key_file = '${ssl_certs_dest}/server-key.pem'" >> $DATADIR/postgresql.conf
+
+      # Allow SSL-only network authorization for user postgres
+      echo "hostssl all             postgres        ${db_allowed_network}           scram-sha-256" >> $DATADIR/pg_hba.conf
+      echo "hostssl ${db_name}             ${db_username}        ${db_allowed_network}           scram-sha-256" >> $DATADIR/pg_hba.conf
+      echo "hostssl ${db_name}             ${db_username}        172.16.0.0/12           scram-sha-256" >> $DATADIR/pg_hba.conf
 
       # start postgresql server
       systemctl enable --now --no-block --force postgresql@${stage}
@@ -351,9 +370,6 @@ write_files:
       GIT_REPOSITORY=$${GIT_REPOSITORY:-${git_repository}}
       DEFAULT_BRANCH=$${DEFAULT_BRANCH:-main}
 
-      # TODO delete this string
-      DEFAULT_BRANCH=$${DEFAULT_BRANCH:-chore/secrets}
-
       setup_ssh_config() {
         local repo_deploy_key=$(aws ssm get-parameter --name "${ssm_repo_deploy_key}" --with-decryption --query 'Parameter.Value' --output text)
         mkdir -p ~/.ssh
@@ -368,20 +384,23 @@ write_files:
         git -C $WORKDIR rev-parse 2>/dev/null || git clone $GIT_REPOSITORY $WORKDIR
 
         cd $WORKDIR
+
+        # always hard reset and clean before any checkout to avoid checkout errors
+        git reset --hard
+        git clean -fd
+
         git fetch --all
 
-        if [[ -n "$${COMMIT_HASH:-}" ]]; then
-          git checkout $COMMIT_HASH
-          # force reset working tree and index to exact commit state + remove all untracked files and directories
-          git reset --hard "$COMMIT_HASH"
-          git clean -fd
-        else
-          git checkout $DEFAULT_BRANCH
-          # force reset working tree and index to exact commit state + remove all untracked files and directories
-          git reset --hard "origin/$DEFAULT_BRANCH"
-          git clean -fd
-          git pull origin $DEFAULT_BRANCH
-        fi
+        # determine commit/branch to reset to
+        COMMIT="origin/$DEFAULT_BRANCH"
+        [[ -n "$${COMMIT_HASH:-}" ]] && COMMIT="$COMMIT_HASH"
+
+        # force reset working tree and index to exact commit state
+        git reset --hard "$COMMIT"
+      }
+
+      configure_host() {
+        [[ -s .deploy/ec2-configure-host.sh ]] && .deploy/ec2-configure-host.sh || return 0
       }
 
       prepare_docker_aws() {
@@ -390,25 +409,35 @@ write_files:
       }
 
       prepare_docker_overrides() {
-        if [[ -s docker-compose.tests.override.yml && -s docker-compose.frontend.override.yml ]]; then
-          docker run --rm -v "$PWD":/workdir mikefarah/yq ea '. as $item ireduce ({}; . * $item)' \
-            docker-compose.tests.override.yml docker-compose.frontend.override.yml > docker-compose.override.yml
-        fi
+        [[ -z "$${COMPOSE_OVERRIDES:-}" ]] && { echo "COMPOSE_OVERRIDES not set, skipping"; return 0; }
+
+        for file in $${COMPOSE_OVERRIDES[@]}; do
+          [[ ! -s "$file" ]] && { echo "File $file not found, skipping"; return 0; }
+        done
+
+        docker run --rm -v "$PWD":/workdir mikefarah/yq ea '. as $item ireduce ({}; . * $item)' \
+          $${COMPOSE_OVERRIDES[@]} > docker-compose.override.yml
       }
 
       setup_env_file() {
-        # TODO create .env file
-        :
-        #aws ssm get-parameter --name "${ssm_ec2_env_file}" --with-decryption --query 'Parameter.Value' --output text > .env
+        [[ -s .env ]] && mv .env .env.bak
+
+        ENV_FILES="${ssm_env_files}"
+        for env_file in $ENV_FILES; do
+          aws ssm get-parameter --name "$env_file" --with-decryption --query 'Parameter.Value' --output text >> .env
+        done
       }
 
       run_docker() {
-        docker compose pull -q
+        docker system prune -f
+        docker compose pull --ignore-pull-failures -q
+        docker compose build -q
         docker compose up -d
       }
 
       setup_ssh_config
       sync_sources
+      configure_host
       prepare_docker_aws
       prepare_docker_overrides
       setup_env_file

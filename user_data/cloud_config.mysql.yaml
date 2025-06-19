@@ -148,9 +148,9 @@ write_files:
         -e "/datadir=/i \
       bind-address=0.0.0.0\n\
       port=${db_port}\n\
-      ssl-ca=/etc/ssl/mysql/ca.pem\n\
-      ssl-cert=/etc/ssl/mysql/server-cert.pem\n\
-      ssl-key=/etc/ssl/mysql/server-key.pem" \
+      ssl-ca=${ssl_certs_dest}/ca.pem\n\
+      ssl-cert=${ssl_certs_dest}/server-cert.pem\n\
+      ssl-key=${ssl_certs_dest}/server-key.pem" \
       $CNF
 
       # Setup ssl
@@ -367,7 +367,7 @@ write_files:
       }
 
       configure_host() {
-        [[ -s .deploy/ec2-configure-host.sh ]] && .deploy/ec2-configure-host.sh
+        [[ -s .deploy/ec2-configure-host.sh ]] && .deploy/ec2-configure-host.sh || return 0
       }
 
       prepare_docker_aws() {
@@ -376,10 +376,14 @@ write_files:
       }
 
       prepare_docker_overrides() {
-        if [[ -s docker-compose.tests.override.yml && -s docker-compose.frontend.override.yml ]]; then
-          docker run --rm -v "$PWD":/workdir mikefarah/yq ea '. as $item ireduce ({}; . * $item)' \
-            docker-compose.tests.override.yml docker-compose.frontend.override.yml > docker-compose.override.yml
-        fi
+        [[ -z "$${COMPOSE_OVERRIDES:-}" ]] && { echo "COMPOSE_OVERRIDES not set, skipping"; return 0; }
+
+        for file in $${COMPOSE_OVERRIDES[@]}; do
+          [[ ! -s "$file" ]] && { echo "File $file not found, skipping"; return 0; }
+        done
+
+        docker run --rm -v "$PWD":/workdir mikefarah/yq ea '. as $item ireduce ({}; . * $item)' \
+          $${COMPOSE_OVERRIDES[@]} > docker-compose.override.yml
       }
 
       setup_env_file() {
@@ -393,7 +397,7 @@ write_files:
 
       run_docker() {
         docker system prune -f
-        docker compose pull -q
+        docker compose pull --ignore-pull-failures -q
         docker compose build -q
         docker compose up -d
       }

@@ -15,12 +15,12 @@ locals {
     http_put_response_hop_limit = 3
   }
   root_block_device = [
-    {
-      encrypted   = true
-      volume_type = "gp3"
-      volume_size = 25
-      tags        = local.ec2_instance_tags
-    }
+    merge(
+      var.root_block_device,
+      {
+        tags = merge(local.ec2_instance_tags, var.root_block_device.tags)
+      }
+    )
   ]
 
   name = "${var.name_prefix}-ec2"
@@ -41,8 +41,14 @@ locals {
     postgres = 5432
   }
 
-  service_name = var.database.engine
-  db_port      = var.database.port != null ? var.database.port : local.default_db_ports[var.database.engine]
+  default_ssl_certs_dest = {
+    mysql    = "/etc/ssl/mysql"
+    postgres = "/etc/ssl/postgres"
+  }
+
+  service_name   = var.database.engine
+  db_port        = var.database.port != null ? var.database.port : local.default_db_ports[var.database.engine]
+  ssl_certs_dest = local.default_ssl_certs_dest[var.database.engine]
 
   storage = {
     data = merge({
@@ -275,13 +281,48 @@ resource "aws_ssm_parameter" "db_credentials" {
   tags = var.tags
 }
 
+locals {
+  replacements = {
+    "{db_url}"      = local.db_credentials
+    "{domain_name}" = var.deployment.domain_name
+  }
+
+  # Replaces all placeholders like {db_url} in each extra env var value.
+  # Uses a predefined map of replacements to substitute the placeholders.
+  # Outputs final KEY=value strings for use in the SSM parameter content.
+  # Example:
+  # { "BASE_URL" = "{domain_name}" } → { "{domain_name}" = var.deployment.domain_name } → { "BASE_URL" = "http://example.com" }
+  resolved_extra_env_vars_auto = {
+    for key, raw_val in var.extra_env_vars_auto : key => (
+      element([
+        for i in range(length(local.replacements)) : (
+          replace(
+            i == 0 ? raw_val : replace(
+              raw_val,
+              element(keys(local.replacements), 0),
+              element(values(local.replacements), 0)
+            ),
+            element(keys(local.replacements), i),
+            element(values(local.replacements), i)
+          )
+        )
+      ], length(local.replacements) - 1)
+    )
+  }
+
+  extra_env_vars_auto = join("\n", [
+    for k, v in local.resolved_extra_env_vars_auto : "${k}=\"${v}\""
+  ])
+}
+
 resource "aws_ssm_parameter" "ec2_env_file_auto" {
   name  = "/${var.name_prefix}/ec2/env_file_auto"
   type  = "SecureString"
   value = <<EOF
-DOMAIN=${var.deployment.domain_name}
-EMAIL=${var.deployment.ssl_email}
-DB_CREDENTIALS=${local.db_credentials}
+DOMAIN="${var.deployment.domain_name}"
+EMAIL="${var.deployment.ssl_email}"
+DB_CREDENTIALS="${local.db_credentials}"
+${local.extra_env_vars_auto}
 EOF
 
   tags = var.tags
@@ -299,8 +340,8 @@ data "aws_ssm_parameter" "params" {
   name     = each.value
 }
 
-
 locals {
+  # Collects all relevant SSM parameter ARNs used in the module
   all_ssm_parameters = concat(
     var.ssl_config.enabled ? [for k in local.ssl_certs_keys : aws_ssm_parameter.ssl_certs[k].arn] : [],
     [
@@ -380,6 +421,10 @@ parameters:
     description: "Optional Git commit hash to checkout (fallback to main if not set)"
     default: ""
     type: String
+  ComposeOverrides:
+    description: "These docker compose override files were be used to build docker-compose.override.yml"
+    default: ""
+    type: String
 mainSteps:
   - action: "aws:runShellScript"
     name: "RunDeploy"
@@ -387,6 +432,7 @@ mainSteps:
       runCommand:
         - |
           export COMMIT_HASH={{ CommitHash }}
+          export COMPOSE_OVERRIDES="{{ ComposeOverrides }}"
           /opt/scripts/deploy-app-in-docker.sh
 EOF
 }
@@ -419,7 +465,7 @@ locals {
 
         ssl_certs            = var.ssl_config.enabled ? join(" ", local.ssl_certs_keys) : ""
         ssl_certs_ssm_prefix = "/${var.name_prefix}/ec2"
-        ssl_certs_dest       = "/etc/ssl/mysql"
+        ssl_certs_dest       = local.ssl_certs_dest
       }
     )
   )
