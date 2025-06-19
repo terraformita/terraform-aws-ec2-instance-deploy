@@ -135,35 +135,38 @@ module "sg" {
 
   vpc_id = var.vpc_config.vpc_id
 
-  ingress_with_cidr_blocks = [
-    {
-      description = "Expose SSH to the Internet"
-      rule        = "ssh-tcp"
-      cidr_blocks = "0.0.0.0/0"
-    },
-    {
-      description = "Expose HTTP to the Internet"
-      rule        = "http-80-tcp"
-      cidr_blocks = "0.0.0.0/0"
-    },
-    {
-      description = "Expose HTTPS to the Internet"
-      rule        = "https-443-tcp"
-      cidr_blocks = "0.0.0.0/0"
-    },
-    {
-      description = "Allow access to ${local.service_name} on port ${local.db_port} from the VPC address space"
-      from_port   = local.db_port
-      to_port     = local.db_port
-      protocol    = "tcp"
-      cidr_blocks = var.vpc_config.cidr_block != "" ? var.vpc_config.cidr_block : "10.0.0.0/8"
-    }
-  ]
+  ingress_with_cidr_blocks = concat(
+    [
+      {
+        description = "Expose HTTP to the Internet"
+        rule        = "http-80-tcp"
+        cidr_blocks = "0.0.0.0/0"
+      },
+      {
+        description = "Expose HTTPS to the Internet"
+        rule        = "https-443-tcp"
+        cidr_blocks = "0.0.0.0/0"
+      },
+      {
+        description = "Allow access to ${local.service_name} on port ${local.db_port} from the VPC address space"
+        from_port   = local.db_port
+        to_port     = local.db_port
+        protocol    = "tcp"
+        cidr_blocks = var.vpc_config.cidr_block
+      }
+    ],
+    var.security_group.ingress_with_cidr_blocks
+  )
 
-  egress_rules = [
-    "https-443-tcp",
-    "ssh-tcp"
-  ]
+  egress_rules = concat(
+    [
+      # OS packages
+      "https-443-tcp",
+      # git repos
+      "ssh-tcp"
+    ],
+    var.security_group.egress_rules
+  )
 
   tags = var.tags
 }

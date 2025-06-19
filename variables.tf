@@ -15,7 +15,7 @@ variable "vpc_config" {
     vpc_id            = string
     subnet_id         = string
     availability_zone = string
-    cidr_block        = optional(string, "")
+    cidr_block        = optional(string, "10.0.0.0/8")
   })
 }
 
@@ -121,4 +121,12 @@ variable "root_block_device" {
     tags        = optional(map(string), {})
   })
   default = {}
+}
+
+variable "security_group" {
+  description = "Additional ingress and egress config for security group"
+  type = object({
+    ingress_with_cidr_blocks = optional(list(any), [])
+    egress_rules             = optional(list(any), [])
+  })
 }
