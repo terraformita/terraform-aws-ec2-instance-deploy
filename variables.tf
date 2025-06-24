@@ -130,3 +130,13 @@ variable "security_group" {
     egress_rules             = optional(list(any), [])
   })
 }
+
+variable "iam" {
+  description = "IAM configuration for EC2 instance."
+  type = object({
+    additional_policies = optional(list(string), [])
+  })
+  default = {
+    additional_policies = []
+  }
+}
