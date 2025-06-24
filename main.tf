@@ -356,59 +356,75 @@ locals {
   )
 }
 
+data "aws_iam_policy_document" "ec2_instance_base" {
+  statement {
+    sid    = "ECRRead"
+    effect = "Allow"
+    actions = [
+      "ecr:GetAuthorizationToken",
+      "ecr:BatchGetImage",
+      "ecr:GetDownloadUrlForLayer"
+    ]
+    resources = ["*"]
+  }
+
+  statement {
+    sid    = "DescribeTags"
+    effect = "Allow"
+    actions = [
+      "ec2:DescribeInstances",
+      "ec2:DescribeVolumes",
+      "ec2:AttachVolume",
+      "ec2:DescribeTags",
+      "autoscaling:DescribeAutoScalingGroups"
+    ]
+    resources = ["*"]
+  }
+
+  statement {
+    sid       = "ReadSSMParameters"
+    effect    = "Allow"
+    actions   = ["ssm:GetParameter"]
+    resources = local.all_ssm_parameters
+  }
+
+  dynamic "statement" {
+    for_each = var.backup.enabled ? [1] : []
+    content {
+      sid       = "ListBackupBucket"
+      effect    = "Allow"
+      actions   = ["s3:ListBucket"]
+      resources = ["arn:aws:s3:::${var.backup.s3_bucket}"]
+    }
+  }
+
+  dynamic "statement" {
+    for_each = var.backup.enabled ? [1] : []
+    content {
+      sid    = "RWDBBackupBucket"
+      effect = "Allow"
+      actions = [
+        "s3:PutObject",
+        "s3:PutObjectAcl",
+        "s3:GetObject",
+        "s3:GetObjectAcl"
+      ]
+      resources = ["arn:aws:s3:::${var.backup.s3_bucket}/*"]
+    }
+  }
+}
+
+data "aws_iam_policy_document" "ec2_instance" {
+  source_policy_documents = concat(
+    [data.aws_iam_policy_document.ec2_instance_base.json],
+    var.iam.additional_policies
+  )
+}
+
 resource "aws_iam_policy" "ec2_instance" {
   name        = local.name
   description = "Policy for ${local.service_name} instance with EC2 permissions"
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Sid    = "ECRRead"
-        Effect = "Allow"
-        Action = [
-          "ecr:GetAuthorizationToken",
-          "ecr:BatchGetImage",
-          "ecr:GetDownloadUrlForLayer"
-        ],
-        Resource = ["*"]
-      },
-      {
-        Sid    = "DescribeTags"
-        Effect = "Allow"
-        Action = [
-          "ec2:DescribeInstances",
-          "ec2:DescribeVolumes",
-          "ec2:AttachVolume",
-          "ec2:DescribeTags",
-          "autoscaling:DescribeAutoScalingGroups"
-        ]
-        Resource = ["*"]
-      },
-      {
-        Sid      = "ReadSSMParameters"
-        Effect   = "Allow"
-        Action   = ["ssm:GetParameter"]
-        Resource = local.all_ssm_parameters
-      },
-      var.backup.enabled ? {
-        Sid      = "ListBackupBucket"
-        Effect   = "Allow"
-        Action   = ["s3:ListBucket"]
-        Resource = ["arn:aws:s3:::${var.backup.s3_bucket}"]
-      } : null,
-      var.backup.enabled ? {
-        Sid    = "RWDBBackupBucket"
-        Effect = "Allow"
-        Action = [
-          "s3:PutObject",
-          "s3:PutObjectAcl",
-          "s3:GetObject",
-          "s3:GetObjectAcl"
-        ]
-        Resource = ["arn:aws:s3:::${var.backup.s3_bucket}/*"]
-      } : null
-    ]
-  })
+  policy      = data.aws_iam_policy_document.ec2_instance.json
 }
 
 resource "aws_ssm_document" "deploy" {

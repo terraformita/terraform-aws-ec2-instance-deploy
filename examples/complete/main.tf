@@ -119,6 +119,32 @@ resource "aws_ssm_parameter" "docker_env" {
   }
 }
 
+# Example of additional IAM policy for SES access
+data "aws_iam_policy_document" "ses_access" {
+  statement {
+    sid    = "SESAccess"
+    effect = "Allow"
+    actions = [
+      "ses:SendEmail",
+      "ses:SendRawEmail"
+    ]
+    resources = ["*"]
+  }
+}
+
+# Example of additional IAM policy for S3 access
+data "aws_iam_policy_document" "s3_access" {
+  statement {
+    sid    = "S3Access"
+    effect = "Allow"
+    actions = [
+      "s3:GetObject",
+      "s3:PutObject"
+    ]
+    resources = ["arn:aws:s3:::my-app-bucket/*"]
+  }
+}
+
 # EC2 instance deploy module
 module "ec2_instance_deploy" {
   source = "../../"
@@ -179,6 +205,19 @@ module "ec2_instance_deploy" {
       device_name = "/dev/xvdv"
       mount_point = "/backup_tmp"
     }
+  }
+
+  security_group = {
+    ingress_with_cidr_blocks = []
+    egress_rules             = []
+  }
+
+  # IAM configuration with additional policies
+  iam = {
+    additional_policies = [
+      data.aws_iam_policy_document.ses_access.json,
+      data.aws_iam_policy_document.s3_access.json
+    ]
   }
 
   tags = var.tags
