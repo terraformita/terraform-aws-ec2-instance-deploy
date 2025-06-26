@@ -42,8 +42,8 @@ locals {
   }
 
   default_ssl_certs_dest = {
-    mysql    = "/etc/ssl/mysql"
-    postgres = "/etc/ssl/postgres"
+    mysql    = "${local.storage.data.mount_point}/ssl/mysql"
+    postgres = "${local.storage.data.mount_point}/ssl/postgres"
   }
 
   service_name   = var.database.engine
