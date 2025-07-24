@@ -117,6 +117,25 @@ write_files:
       #!/usr/bin/env bash
       set -euo pipefail
 
+      # PostgreSQL Database Initialization Script
+      # Usage:
+      #   /opt/scripts/postgresql-initdb.sh /mountpoint           - Normal initialization
+      #   /opt/scripts/postgresql-initdb.sh --force /mountpoint   - Force reinitialization (removes all data)
+
+      # Parse command line arguments
+      FORCE_INIT=false
+      while [[ $# -gt 0 ]]; do
+        case $1 in
+          --force)
+            FORCE_INIT=true
+            shift
+            ;;
+          *)
+            break
+            ;;
+        esac
+      done
+
       # Set default paths
       MOUNTPOINT=$${mountpoint:-$1}
       PGDIR=$MOUNTPOINT/pgsql
@@ -131,6 +150,13 @@ write_files:
       # Create systemd unit file
       if [ ! -s /etc/systemd/system/postgresql@${stage}.service.d/30-postgresql-setup.conf ]; then
         postgresql-new-systemd-unit --unit=postgresql@${stage} --datadir=$DATADIR
+      fi
+
+      # Force reinitialization if --force flag is specified
+      if [ "$FORCE_INIT" = true ] && [ -d $DATADIR ]; then
+        echo "Force initialization requested. Removing existing data directory..."
+        systemctl stop postgresql@${stage}
+        rm -rf "$DATADIR"
       fi
 
       if [ -d $DATADIR ]; then

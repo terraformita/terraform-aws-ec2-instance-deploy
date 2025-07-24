@@ -111,11 +111,30 @@ write_files:
       curl -SL https://github.com/docker/compose/releases/download/v$version/docker-compose-$${os,,}-$arch -o $plugins_dir/docker-compose
       chmod +x $plugins_dir/docker-compose
 
-  - path: /opt/scripts/mysql-init.sh
+  - path: /opt/scripts/mysql-initdb.sh
     permissions: '0700'
     content: |
       #!/usr/bin/env bash
       set -euo pipefail
+
+      # MySQL Database Initialization Script
+      # Usage:
+      #   /opt/scripts/mysql-initdb.sh /mountpoint           - Normal initialization
+      #   /opt/scripts/mysql-initdb.sh --force /mountpoint   - Force reinitialization (removes all data)
+
+      # Parse command line arguments
+      FORCE_INIT=false
+      while [[ $# -gt 0 ]]; do
+        case $1 in
+          --force)
+            FORCE_INIT=true
+            shift
+            ;;
+          *)
+            break
+            ;;
+        esac
+      done
 
       # Set default paths
       MOUNTPOINT=$${mountpoint:-$1}
@@ -174,6 +193,15 @@ write_files:
 
       # Start and enable MySQL
       systemctl enable --now mariadb
+
+      # Force reinitialization if --force flag is specified
+      if [ "$FORCE_INIT" = true ]; then
+        echo "Force initialization requested. Removing existing data..."
+        systemctl stop mariadb
+        rm -rf "$DATADIR"/*
+        rm -f "$DATADIR/.mysql_initialized"
+        systemctl start mariadb
+      fi
 
       # Set root password and create user/database
       if [ ! -f "$DATADIR/.mysql_initialized" ]; then
@@ -424,7 +452,7 @@ runcmd:
   - systemctl disable --now --no-block --force docker
   # initialize mysql server (separated from "packages:" block)
   - yum install -y mariadb105-server
-  - /opt/scripts/mysql-init.sh ${data_mountpoint}
+  - /opt/scripts/mysql-initdb.sh ${data_mountpoint}
   - systemctl enable --now --no-block --force mariadb
   # enable mysql backup
   - systemctl daemon-reload
