@@ -588,7 +588,8 @@ write_files:
 
       WORKDIR=$${WORKDIR:-/srv/code}
       GIT_REPOSITORY=$${GIT_REPOSITORY:-${git_repository}}
-      DEFAULT_BRANCH=$${DEFAULT_BRANCH:-main}
+      DEFAULT_BRANCH=$${DEFAULT_BRANCH:-${default_branch}}
+      COMPOSE_OVERRIDES=$${COMPOSE_OVERRIDES:-${compose_overrides}}
 
       setup_ssh_config() {
         local repo_deploy_key=$(aws ssm get-parameter --name "${ssm_repo_deploy_key}" --with-decryption --query 'Parameter.Value' --output text)

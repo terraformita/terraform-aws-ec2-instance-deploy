@@ -47,14 +47,18 @@ variable "ssm_parameters" {
 variable "deployment" {
   description = "Deployment configuration."
   type = object({
-    enabled        = optional(bool, true)
-    git_repository = string
-    domain_name    = optional(string, "")
-    ssl_email      = optional(string, "")
+    enabled           = optional(bool, true)
+    git_repository    = string
+    default_branch    = optional(string, "main")
+    domain_name       = optional(string, "")
+    ssl_email         = optional(string, "")
+    compose_overrides = optional(string, "")
   })
   default = {
-    enabled        = false
-    git_repository = ""
+    enabled           = false
+    git_repository    = ""
+    default_branch    = "main"
+    compose_overrides = ""
   }
 }
 

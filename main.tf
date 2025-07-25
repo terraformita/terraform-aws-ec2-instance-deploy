@@ -479,8 +479,10 @@ locals {
         db_port            = local.db_port
 
         git_repository      = var.deployment.git_repository
+        default_branch      = var.deployment.default_branch
         ssm_repo_deploy_key = var.ssm_parameters.repo_deploy_key
         ssm_env_files       = join(" ", concat(var.ssm_parameters.env_files, [aws_ssm_parameter.ec2_env_file_auto.name]))
+        compose_overrides   = var.deployment.compose_overrides
 
         ssl_certs            = var.ssl_config.enabled ? join(" ", local.ssl_certs_keys) : ""
         ssl_certs_ssm_prefix = "/${var.name_prefix}/ec2"
