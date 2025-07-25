@@ -339,14 +339,14 @@ write_files:
         echo "Uploading global backup to $GLOBAL_S3_PATH..."
         aws s3 cp "$BACKUP_DIR/$GLOBAL_BACKUP_FILE" "$GLOBAL_S3_PATH"
 
-        # Fetch the list of all databases
-        DB_LIST=$(psql -h $IP -U $DB_USER -d postgres -t -c "SELECT datname FROM pg_database WHERE datistemplate = false;" | tr -d ' ')
+        # Fetch the list of all databases (excluding postgres database)
+        DB_LIST=$(psql -h $IP -U $DB_USER -d postgres -t -c "SELECT datname FROM pg_database WHERE datistemplate = false AND datname != 'postgres';" | tr -d ' ')
 
         # Backup each database
         for DB_NAME in $DB_LIST; do
           echo "Creating a backup for database '$DB_NAME'..."
-          BACKUP_FILE="$${DB_NAME}.sql.gz"
-          pg_dump -h $IP -U $DB_USER -F c -d $DB_NAME | gzip > "$BACKUP_DIR/$BACKUP_FILE"
+          BACKUP_FILE="$${DB_NAME}.dump"
+          pg_dump -h $IP -U $DB_USER -F c --create -d $DB_NAME > "$BACKUP_DIR/$BACKUP_FILE"
 
           if [ $? -ne 0 ]; then
             echo "Error while creating backup for database '$DB_NAME'."
@@ -367,6 +367,7 @@ write_files:
         done
 
         # Clean up temporary backup files and password file
+        rm -f "$BACKUP_DIR"/*.dump
         rm -f "$BACKUP_DIR"/*.gz
         rm -f "$PGPASSFILE"
         echo "Backup process completed."
@@ -377,9 +378,9 @@ write_files:
         echo "Available PostgreSQL backup directories in s3://$S3_BUCKET/$SERVICE/"
         echo "Date       Size     Backup Set"
         echo "---------- -------- ----------"
-        aws s3 ls "s3://$S3_BUCKET/$SERVICE/" --recursive | grep "\.sql\.gz$" | \
+        aws s3 ls "s3://$S3_BUCKET/$SERVICE/" --recursive | grep "\.dump$" | \
         awk '{
-          # Extract date from path like SERVICE/2023/12/25/file.sql.gz
+          # Extract date from path like SERVICE/2023/12/25/file.dump
           split($4, path_parts, "/")
           if (length(path_parts) >= 4) {
             iso_date = path_parts[2] "-" path_parts[3] "-" path_parts[4]
@@ -429,7 +430,7 @@ write_files:
             aws s3 ls "s3://$S3_BUCKET/$SERVICE/$formatted_date/" || echo "  (directory not found or empty)"
 
             # Check if backup files exist in this date directory
-            BACKUP_EXISTS=$(aws s3 ls "s3://$S3_BUCKET/$SERVICE/$formatted_date/" | grep "\.sql\.gz$")
+            BACKUP_EXISTS=$(aws s3 ls "s3://$S3_BUCKET/$SERVICE/$formatted_date/" | grep "\.dump$")
 
             if [[ -z "$BACKUP_EXISTS" ]]; then
               echo "No backup found for date $restore_path"
@@ -447,7 +448,7 @@ write_files:
         else
           # Find the latest backup
           echo "Finding latest backup..."
-          LATEST_BACKUP_PATH=$(aws s3 ls "s3://$S3_BUCKET/$SERVICE/" --recursive | grep "globals_roles_privileges_backup.sql.gz$" | sort | tail -n 1 | awk '{print $4}')
+          LATEST_BACKUP_PATH=$(aws s3 ls "s3://$S3_BUCKET/$SERVICE/" --recursive | grep "\.dump$" | sort | tail -n 1 | awk '{print $4}')
 
           if [[ -z "$LATEST_BACKUP_PATH" ]]; then
             echo "No backups found"
@@ -461,7 +462,7 @@ write_files:
         echo "Downloading backups from $S3_BASE_PATH..."
 
         # Download all backup files from the directory
-        aws s3 sync "$S3_BASE_PATH/" "$BACKUP_DIR/" --exclude "*" --include "*.sql.gz"
+        aws s3 sync "$S3_BASE_PATH/" "$BACKUP_DIR/" --exclude "*" --include "*.dump" --include "*.sql.gz"
 
         if [ $? -ne 0 ]; then
           echo "Error downloading backups from S3"
@@ -471,6 +472,13 @@ write_files:
         echo "Force reinitializing PostgreSQL database..."
         /opt/scripts/postgresql-initdb.sh --force "$DATA_MOUNTPOINT"
 
+        # Wait for PostgreSQL to be ready
+        echo "Waiting for PostgreSQL to be ready..."
+        until pg_isready -h $IP -U $DB_USER -q; do
+          sleep 0.5
+        done
+        echo "PostgreSQL is ready!"
+
         # Restore global objects first
         if [[ -f "$BACKUP_DIR/globals_roles_privileges_backup.sql.gz" ]]; then
           echo "Restoring global roles and privileges..."
@@ -478,23 +486,19 @@ write_files:
         fi
 
         # Restore individual databases
-        for BACKUP_FILE in "$BACKUP_DIR"/*.sql.gz; do
-          if [[ "$BACKUP_FILE" != *"globals_roles_privileges_backup.sql.gz" ]]; then
-            DB_NAME=$(basename "$BACKUP_FILE" .sql.gz)
-            echo "Restoring database $DB_NAME..."
+        for BACKUP_FILE in "$BACKUP_DIR"/*.dump; do
+          DB_NAME=$(basename "$BACKUP_FILE" .dump)
+          echo "Restoring database $DB_NAME..."
 
-            # Create database
-            createdb -h $IP -U $DB_USER "$DB_NAME"
+          # Restore database
+          pg_restore -h $IP -U $DB_USER -d postgres --clean --create --if-exists --verbose "$BACKUP_FILE"
 
-            # Restore database
-            zcat "$BACKUP_FILE" | pg_restore -h $IP -U $DB_USER -d "$DB_NAME" --verbose
-
-            if [ $? -ne 0 ]; then
-              echo "Warning: Some errors occurred while restoring database $DB_NAME"
-            fi
+          if [ $? -ne 0 ]; then
+            echo "Warning: Some errors occurred while restoring database $DB_NAME"
           fi
         done
 
+        rm -f "$BACKUP_DIR"/*.dump
         rm -f "$BACKUP_DIR"/*.gz
         rm -f "$PGPASSFILE"
         echo "Restore completed successfully."
