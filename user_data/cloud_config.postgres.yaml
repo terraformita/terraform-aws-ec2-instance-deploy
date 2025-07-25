@@ -396,20 +396,29 @@ write_files:
         echo "Backup process completed."
       }
 
-      # Function to list backups
+            # Function to list backups
       list_backups() {
         echo "Available PostgreSQL backup directories in s3://$S3_BUCKET/$SERVICE/"
         echo "Date       Size     Backup Set"
         echo "---------- -------- ----------"
-        aws s3 ls "s3://$S3_BUCKET/$SERVICE/" --recursive | grep "globals_roles_privileges_backup.sql.gz$" | \
+        aws s3 ls "s3://$S3_BUCKET/$SERVICE/" --recursive | grep "\.sql\.gz$" | \
         awk '{
-          # Extract date from path like SERVICE/2023/12/25/globals_roles_privileges_backup.sql.gz
+          # Extract date from path like SERVICE/2023/12/25/file.sql.gz
           split($4, path_parts, "/")
           if (length(path_parts) >= 4) {
             iso_date = path_parts[2] "-" path_parts[3] "-" path_parts[4]
+            dir_key = iso_date
+
+            # Accumulate total size per directory
+            dir_sizes[dir_key] += $3
+          }
+        }
+        END {
+          # Print accumulated results
+          for (dir in dir_sizes) {
+            size = dir_sizes[dir]
 
             # Format size with units
-            size = $3
             if (size >= 1073741824) {
               size_fmt = sprintf("%.1fGB", size/1073741824)
             } else if (size >= 1048576) {
@@ -420,11 +429,9 @@ write_files:
               size_fmt = sprintf("%dB", size)
             }
 
-            printf "%-10s %-8s %s\n", iso_date, size_fmt, iso_date
-          } else {
-            printf "%-10s %-8s %s\n", "unknown", $3"B", $4
+            printf "%-10s %-8s %s\n", dir, size_fmt, dir
           }
-        }'
+        }' | sort
       }
 
       # Function to restore backup

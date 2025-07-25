@@ -396,7 +396,7 @@ write_files:
         echo "Backup process completed."
       }
 
-      # Function to list backups
+            # Function to list backups
       list_backups() {
         echo "Available MySQL backups in s3://$S3_BUCKET/$SERVICE/"
         echo "Date       Size     Time"
@@ -407,17 +407,26 @@ write_files:
           split($4, path_parts, "/")
           if (length(path_parts) >= 4) {
             iso_date = path_parts[2] "-" path_parts[3] "-" path_parts[4]
+            dir_key = iso_date
             filename = path_parts[length(path_parts)]
 
-            # Extract time from filename like mysql_all_databases_20231225_103022.sql.gz
+            # Accumulate total size per directory
+            dir_sizes[dir_key] += $3
+
+            # Extract time from first file in directory (latest time wins)
             if (match(filename, /_([0-9]{8})_([0-9]{6})\.sql\.gz$/, time_parts)) {
               time_str = substr(time_parts[2], 1, 2) ":" substr(time_parts[2], 3, 2) ":" substr(time_parts[2], 5, 2)
-            } else {
-              time_str = "unknown"
+              dir_times[dir_key] = time_str
             }
+          }
+        }
+        END {
+          # Print accumulated results
+          for (dir in dir_sizes) {
+            size = dir_sizes[dir]
+            time_str = dir_times[dir] ? dir_times[dir] : "unknown"
 
             # Format size with units
-            size = $3
             if (size >= 1073741824) {
               size_fmt = sprintf("%.1fGB", size/1073741824)
             } else if (size >= 1048576) {
@@ -428,11 +437,9 @@ write_files:
               size_fmt = sprintf("%dB", size)
             }
 
-            printf "%-10s %-8s %s\n", iso_date, size_fmt, time_str
-          } else {
-            printf "%-10s %-8s %s\n", "unknown", $3"B", $4
+            printf "%-10s %-8s %s\n", dir, size_fmt, time_str
           }
-        }'
+        }' | sort
       }
 
       # Function to restore backup
