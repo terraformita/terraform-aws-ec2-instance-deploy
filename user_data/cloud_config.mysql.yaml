@@ -288,60 +288,36 @@ write_files:
       SSM_PARAM="${ssm_db_credentials}"
       S3_BUCKET="${db_backup_bucket}"
       BACKUP_DIR="${db_backup_dir}"
+      DATA_MOUNTPOINT="${data_mountpoint}"
 
       export AWS_DEFAULT_REGION="$(ec2-metadata --availability-zone | awk '{print $2}' | rev | cut -c2- | rev)"
 
-      # Parse command line arguments using getopt
-      OPTIONS=$(getopt -o "" --long "create::,list,restore::" -- "$@")
-      if [ $? -ne 0 ]; then
-        echo "Error: Invalid arguments"
-        echo "Use --create [path], --list, or --restore [YYYY-MM-DD|path]"
-        exit 1
-      fi
-
-      eval set -- "$OPTIONS"
-
-      COMMAND=""
-      ARGUMENT=""
-
-      while true; do
+      # Parse command line arguments
+      if [[ $# -eq 0 ]]; then
+        # No arguments - default to create
+        COMMAND="--create"
+        ARGUMENT=""
+      else
+        # Parse arguments
         case "$1" in
           --create)
             COMMAND="--create"
-            if [[ -n "$2" ]]; then
-              ARGUMENT="$2"
-              shift 2
-            else
-              shift
-            fi
+            ARGUMENT="$${2:-}"
             ;;
           --list)
             COMMAND="--list"
-            shift
+            ARGUMENT=""
             ;;
           --restore)
             COMMAND="--restore"
-            if [[ -n "$2" ]]; then
-              ARGUMENT="$2"
-              shift 2
-            else
-              shift
-            fi
-            ;;
-          --)
-            shift
-            break
+            ARGUMENT="$${2:-}"
             ;;
           *)
-            echo "Error: Unknown option $1"
+            echo "Error: Unknown command $1"
+            echo "Use --create [path], --list, or --restore [YYYY-MM-DD|path]"
             exit 1
             ;;
         esac
-      done
-
-      # If no command provided, default to --create for backward compatibility
-      if [[ -z "$COMMAND" ]]; then
-        COMMAND="--create"
       fi
 
       # Common function to get database credentials
@@ -454,12 +430,21 @@ write_files:
             # Date format YYYY-MM-DD
             formatted_date=$(echo "$restore_path" | awk -F'-' '{printf "%s/%02d/%02d", $1, $2, $3}')
             echo "Looking for backups from date: $formatted_date"
+            echo "Searching in: s3://$S3_BUCKET/$SERVICE/$formatted_date/"
+
+            # List what's available for debugging
+            echo "Available files in this date directory:"
+            aws s3 ls "s3://$S3_BUCKET/$SERVICE/$formatted_date/" || echo "  (directory not found or empty)"
 
             # Find the latest backup from that date
             LATEST_BACKUP=$(aws s3 ls "s3://$S3_BUCKET/$SERVICE/$formatted_date/" | grep "\.sql\.gz$" | sort | tail -n 1 | awk '{print $4}')
 
             if [[ -z "$LATEST_BACKUP" ]]; then
+              echo ""
               echo "No backup found for date $restore_path"
+              echo ""
+              echo "Available backup dates:"
+              /opt/scripts/mysql-backup.sh --list
               exit 1
             fi
 
