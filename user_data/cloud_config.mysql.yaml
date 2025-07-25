@@ -372,7 +372,7 @@ write_files:
         echo "Backup process completed."
       }
 
-            # Function to list backups
+      # Function to list backups
       list_backups() {
         echo "Available MySQL backups in s3://$S3_BUCKET/$SERVICE/"
         echo "Date       Size     Time"
@@ -477,20 +477,16 @@ write_files:
           exit 1
         fi
 
-        echo "Stopping MySQL service..."
-        systemctl stop mariadb
+        echo "Force reinitializing MySQL database..."
+        /opt/scripts/mysql-initdb.sh --force "$DATA_MOUNTPOINT"
 
         echo "Restoring backup..."
         zcat "$LOCAL_FILE" | mysql --user=root --password="$PASSWORD"
 
         if [ $? -ne 0 ]; then
           echo "Error restoring backup"
-          systemctl start mariadb
           exit 1
         fi
-
-        echo "Starting MySQL service..."
-        systemctl start mariadb
 
         rm -f "$LOCAL_FILE"
         echo "Restore completed successfully."
