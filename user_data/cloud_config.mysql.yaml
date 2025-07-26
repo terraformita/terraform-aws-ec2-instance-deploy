@@ -273,63 +273,241 @@ write_files:
       #!/usr/bin/env bash
       set -euo pipefail
 
+      # MySQL Backup and Restore Script
+      # Usage:
+      #   /opt/scripts/mysql-backup.sh --create                                    - Create backup with current date
+      #   /opt/scripts/mysql-backup.sh --create /path/to/file/custom.sql.gz        - Create backup to custom S3 path
+      #   /opt/scripts/mysql-backup.sh --list                                      - List available backups
+      #   /opt/scripts/mysql-backup.sh --restore                                   - Restore latest backup
+      #   /opt/scripts/mysql-backup.sh --restore 2023-12-25                        - Restore backup from specific date
+      #   /opt/scripts/mysql-backup.sh --restore /path/to/file/custom.sql.gz       - Restore specific backup file
+
       # Configuration
       SERVICE="${service_name}"
       DB_USER="${db_backup_user}"
       SSM_PARAM="${ssm_db_credentials}"
       S3_BUCKET="${db_backup_bucket}"
       BACKUP_DIR="${db_backup_dir}"
-      TIMESTAMP=$(date +'%Y/%m/%d')
+      DATA_MOUNTPOINT="${data_mountpoint}"
 
       export AWS_DEFAULT_REGION="$(ec2-metadata --availability-zone | awk '{print $2}' | rev | cut -c2- | rev)"
 
-      # Fetch connection string from AWS SSM Parameter Store
-      echo "Fetching connection string from AWS SSM Parameter Store..."
-      CONNECTION_STRING=$(aws ssm get-parameter --name "$SSM_PARAM" --with-decryption --query 'Parameter.Value' --output text)
-
-      # Extract password from the connection string
-      PASSWORD=$(echo "$CONNECTION_STRING" | awk -F'[:@]' '{print $3}')
-
-      # Check if the password retrieval was successful
-      if [ -z "$PASSWORD" ]; then
-        echo "Error: failed to retrieve password from SSM Parameter Store."
-        exit 1
-      fi
-
-      # Create a temporary directory for backups
-      mkdir -p "$BACKUP_DIR"
-
-      # Create backup filename with timestamp
-      BACKUP_FILE="mysql_all_databases_$(date +%Y%m%d_%H%M%S).sql.gz"
-
-      # Backup all databases
-      echo "Creating backup of all MySQL databases..."
-      mysqldump --user=root --password="$PASSWORD" --all-databases --single-transaction --quick --lock-tables=false | gzip > "$BACKUP_DIR/$BACKUP_FILE"
-
-      # Check if backup was successful
-      if [ $? -ne 0 ]; then
-        echo "Error while creating backup."
-        exit 1
-      fi
-
-      # Upload backup to S3
-      S3_PATH="s3://$S3_BUCKET/$SERVICE/$TIMESTAMP/$BACKUP_FILE"
-      echo "Uploading backup to $S3_PATH..."
-      aws s3 cp "$BACKUP_DIR/$BACKUP_FILE" "$S3_PATH"
-
-      # Check if upload was successful
-      if [ $? -eq 0 ]; then
-        echo "Backup successfully uploaded to $S3_PATH"
+      # Parse command line arguments
+      if [[ $# -eq 0 ]]; then
+        # No arguments - default to create
+        COMMAND="--create"
+        ARGUMENT=""
       else
-        echo "Error uploading backup to S3"
-        exit 1
+        # Parse arguments
+        case "$1" in
+          --create)
+            COMMAND="--create"
+            ARGUMENT="$${2:-}"
+            ;;
+          --list)
+            COMMAND="--list"
+            ARGUMENT=""
+            ;;
+          --restore)
+            COMMAND="--restore"
+            ARGUMENT="$${2:-}"
+            ;;
+          *)
+            echo "Error: Unknown command $1"
+            echo "Use --create [path], --list, or --restore [YYYY-MM-DD|path]"
+            exit 1
+            ;;
+        esac
       fi
 
-      # Clean up temporary backup files
-      echo "Cleaning up local backup files..."
-      rm -f "$BACKUP_DIR/$BACKUP_FILE"
+      # Common function to get database credentials
+      get_db_credentials() {
+        echo "Fetching connection string from AWS SSM Parameter Store..."
+        CONNECTION_STRING=$(aws ssm get-parameter --name "$SSM_PARAM" --with-decryption --query 'Parameter.Value' --output text)
+        PASSWORD=$(echo "$CONNECTION_STRING" | awk -F'[:@]' '{print $3}')
 
-      echo "Backup process completed."
+        if [ -z "$PASSWORD" ]; then
+          echo "Error: failed to retrieve password from SSM Parameter Store."
+          exit 1
+        fi
+      }
+
+      # Function to create backup
+      create_backup() {
+        local custom_path="$1"
+        get_db_credentials
+
+        mkdir -p "$BACKUP_DIR"
+
+        if [[ -n "$custom_path" ]]; then
+          # Custom S3 path provided
+          S3_PATH="s3://$S3_BUCKET/$custom_path"
+          BACKUP_FILE=$(basename "$custom_path")
+        else
+          # Default path with current date
+          TIMESTAMP=$(date +'%Y/%m/%d')
+          BACKUP_FILE="mysql_all_databases_$(date +%Y%m%d_%H%M%S).sql.gz"
+          S3_PATH="s3://$S3_BUCKET/$SERVICE/$TIMESTAMP/$BACKUP_FILE"
+        fi
+
+        echo "Creating backup of all MySQL databases..."
+        mysqldump --user=root --password="$PASSWORD" --all-databases --single-transaction --quick --lock-tables=false | gzip > "$BACKUP_DIR/$BACKUP_FILE"
+
+        if [ $? -ne 0 ]; then
+          echo "Error while creating backup."
+          exit 1
+        fi
+
+        echo "Uploading backup to $S3_PATH..."
+        aws s3 cp "$BACKUP_DIR/$BACKUP_FILE" "$S3_PATH"
+
+        if [ $? -eq 0 ]; then
+          echo "Backup successfully uploaded to $S3_PATH"
+        else
+          echo "Error uploading backup to S3"
+          exit 1
+        fi
+
+        rm -f "$BACKUP_DIR/$BACKUP_FILE"
+        echo "Backup process completed."
+      }
+
+      # Function to list backups
+      list_backups() {
+        echo "Available MySQL backups in s3://$S3_BUCKET/$SERVICE/"
+        echo "Date       Size     Time"
+        echo "---------- -------- --------"
+        aws s3 ls "s3://$S3_BUCKET/$SERVICE/" --recursive | grep "\.sql\.gz$" | \
+        awk '{
+          # Extract date from path like SERVICE/2023/12/25/file.sql.gz
+          split($4, path_parts, "/")
+          if (length(path_parts) >= 4) {
+            iso_date = path_parts[2] "-" path_parts[3] "-" path_parts[4]
+            dir_key = iso_date
+            filename = path_parts[length(path_parts)]
+
+            # Accumulate total size per directory
+            dir_sizes[dir_key] += $3
+
+            # Extract time from first file in directory (latest time wins)
+            if (match(filename, /_([0-9]{8})_([0-9]{6})\.sql\.gz$/, time_parts)) {
+              time_str = substr(time_parts[2], 1, 2) ":" substr(time_parts[2], 3, 2) ":" substr(time_parts[2], 5, 2)
+              dir_times[dir_key] = time_str
+            }
+          }
+        }
+        END {
+          # Print accumulated results
+          for (dir in dir_sizes) {
+            size = dir_sizes[dir]
+            time_str = dir_times[dir] ? dir_times[dir] : "unknown"
+
+            # Format size with units
+            if (size >= 1073741824) {
+              size_fmt = sprintf("%.1fGB", size/1073741824)
+            } else if (size >= 1048576) {
+              size_fmt = sprintf("%.1fMB", size/1048576)
+            } else if (size >= 1024) {
+              size_fmt = sprintf("%.1fKB", size/1024)
+            } else {
+              size_fmt = sprintf("%dB", size)
+            }
+
+            printf "%-10s %-8s %s\n", dir, size_fmt, time_str
+          }
+        }' | sort
+      }
+
+      # Function to restore backup
+      restore_backup() {
+        local restore_path="$1"
+        get_db_credentials
+
+        mkdir -p "$BACKUP_DIR"
+
+        if [[ -n "$restore_path" ]]; then
+          if [[ "$restore_path" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+            # Date format YYYY-MM-DD
+            formatted_date=$(echo "$restore_path" | awk -F'-' '{printf "%s/%02d/%02d", $1, $2, $3}')
+            echo "Looking for backups from date: $formatted_date"
+            echo "Searching in: s3://$S3_BUCKET/$SERVICE/$formatted_date/"
+
+            # List what's available for debugging
+            echo "Available files in this date directory:"
+            aws s3 ls "s3://$S3_BUCKET/$SERVICE/$formatted_date/" || echo "  (directory not found or empty)"
+
+            # Find the latest backup from that date
+            LATEST_BACKUP=$(aws s3 ls "s3://$S3_BUCKET/$SERVICE/$formatted_date/" | grep "\.sql\.gz$" | sort | tail -n 1 | awk '{print $4}')
+
+            if [[ -z "$LATEST_BACKUP" ]]; then
+              echo ""
+              echo "No backup found for date $restore_path"
+              echo ""
+              echo "Available backup dates:"
+              /opt/scripts/mysql-backup.sh --list
+              exit 1
+            fi
+
+            S3_PATH="s3://$S3_BUCKET/$SERVICE/$formatted_date/$LATEST_BACKUP"
+            LOCAL_FILE="$BACKUP_DIR/$LATEST_BACKUP"
+          else
+            # Custom S3 path
+            S3_PATH="s3://$S3_BUCKET/$restore_path"
+            LOCAL_FILE="$BACKUP_DIR/$(basename "$restore_path")"
+          fi
+        else
+          # Find the latest backup
+          echo "Finding latest backup..."
+          LATEST_BACKUP=$(aws s3 ls "s3://$S3_BUCKET/$SERVICE/" --recursive | grep "\.sql\.gz$" | sort | tail -n 1 | awk '{print $4}')
+
+          if [[ -z "$LATEST_BACKUP" ]]; then
+            echo "No backups found"
+            exit 1
+          fi
+
+          S3_PATH="s3://$S3_BUCKET/$LATEST_BACKUP"
+          LOCAL_FILE="$BACKUP_DIR/$(basename "$LATEST_BACKUP")"
+        fi
+
+        echo "Downloading backup from $S3_PATH..."
+        aws s3 cp "$S3_PATH" "$LOCAL_FILE"
+
+        if [ $? -ne 0 ]; then
+          echo "Error downloading backup from S3"
+          exit 1
+        fi
+
+        echo "Force reinitializing MySQL database..."
+        /opt/scripts/mysql-initdb.sh --force "$DATA_MOUNTPOINT"
+
+        echo "Restoring backup..."
+        zcat "$LOCAL_FILE" | mysql --user=root --password="$PASSWORD"
+
+        if [ $? -ne 0 ]; then
+          echo "Error restoring backup"
+          exit 1
+        fi
+
+        rm -f "$LOCAL_FILE"
+        echo "Restore completed successfully."
+      }
+
+      # Execute command
+      case "$COMMAND" in
+        --create)
+          create_backup "$ARGUMENT"
+          ;;
+        --list)
+          list_backups
+          ;;
+        --restore)
+          restore_backup "$ARGUMENT"
+          ;;
+        *)
+          echo "Error: Unknown command $COMMAND"
+          exit 1
+          ;;
+      esac
 
   - path: /etc/systemd/system/mysql-backup.service
     permissions: '0644'
@@ -363,7 +541,8 @@ write_files:
 
       WORKDIR=$${WORKDIR:-/srv/code}
       GIT_REPOSITORY=$${GIT_REPOSITORY:-${git_repository}}
-      DEFAULT_BRANCH=$${DEFAULT_BRANCH:-main}
+      DEFAULT_BRANCH=$${DEFAULT_BRANCH:-${default_branch}}
+      COMPOSE_OVERRIDES=$${COMPOSE_OVERRIDES:-${compose_overrides}}
 
       setup_ssh_config() {
         local repo_deploy_key=$(aws ssm get-parameter --name "${ssm_repo_deploy_key}" --with-decryption --query 'Parameter.Value' --output text)
@@ -395,7 +574,7 @@ write_files:
       }
 
       configure_host() {
-        [[ -s .deploy/ec2-configure-host.sh ]] && .deploy/ec2-configure-host.sh || return 0
+        [[ -s .deploy/ec2-configure-host.sh ]] && .deploy/ec2-configure-host.sh
       }
 
       prepare_docker_aws() {
