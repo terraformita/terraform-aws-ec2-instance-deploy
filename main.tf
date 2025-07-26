@@ -572,7 +572,7 @@ parameters:
     default: ""
     type: String
 mainSteps:
-  - action: "aws:runShellScript"
+  - action: "aws:runScript"
     name: "RunDeploy"
     inputs:
       runCommand:
