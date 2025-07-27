@@ -1,0 +1,1 @@
+Both cloud-init documents (postgres and mysql) must be synchronized in structure and logic as they share functionality.

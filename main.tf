@@ -336,33 +336,6 @@ EOF
   tags = var.tags
 }
 
-#### CLOUDWATCH LOG GROUP
-# Log group configuration
-locals {
-  create_log_group        = var.deployment.log_group.name == ""
-  log_group_name          = var.deployment.log_group.name != "" ? var.deployment.log_group.name : "${var.name_prefix}-ec2-deploy"
-  log_group_arn           = try(aws_cloudwatch_log_group.deploy[0].arn, data.aws_cloudwatch_log_group.deploy[0].arn)
-  log_group_retention     = try(var.deployment.log_group.retention_in_days, null)
-  log_group_kms_key       = try(var.deployment.log_group.kms_key_arn, null)
-  create_log_group_policy = var.deployment.log_group.name != "" || local.create_log_group
-}
-
-resource "aws_cloudwatch_log_group" "deploy" {
-  count = local.create_log_group ? 1 : 0
-
-  name              = local.log_group_name
-  retention_in_days = local.log_group_retention
-  kms_key_id        = local.log_group_kms_key
-
-  tags = var.tags
-}
-
-data "aws_cloudwatch_log_group" "deploy" {
-  count = local.create_log_group ? 0 : 1
-
-  name = var.deployment.log_group.name
-}
-
 #### IAM
 locals {
   ssm_params = concat(
@@ -500,11 +473,12 @@ locals {
         db_backup_user     = local.service_name
         db_port            = local.db_port
 
-        git_repository      = var.deployment.git_repository
-        default_branch      = var.deployment.default_branch
-        ssm_repo_deploy_key = var.ssm_parameters.repo_deploy_key
-        ssm_env_files       = join(" ", concat(var.ssm_parameters.env_files, [aws_ssm_parameter.ec2_env_file_auto.name]))
-        compose_overrides   = var.deployment.compose_overrides
+        git_repository        = var.deployment.git_repository
+        default_branch        = var.deployment.default_branch
+        ssm_repo_deploy_key   = var.ssm_parameters.repo_deploy_key
+        ssm_cloudwatch_config = aws_ssm_parameter.cloudwatch_config.name
+        ssm_env_files         = join(" ", concat(var.ssm_parameters.env_files, [aws_ssm_parameter.ec2_env_file_auto.name]))
+        compose_overrides     = var.deployment.compose_overrides
 
         ssl_certs            = var.ssl_config.enabled ? join(" ", local.ssl_certs_keys) : ""
         ssl_certs_ssm_prefix = "/${var.name_prefix}/ec2"
@@ -553,6 +527,51 @@ module "ec2_instance" {
   tags = local.ec2_instance_tags
 }
 
+#### CLOUDWATCH LOG GROUP
+# Log group configuration
+locals {
+  create_log_group        = var.deployment.log_group.name == ""
+  log_group_name          = var.deployment.log_group.name != "" ? var.deployment.log_group.name : "${var.name_prefix}-ec2-deploy"
+  log_group_arn           = try(aws_cloudwatch_log_group.deploy[0].arn, data.aws_cloudwatch_log_group.deploy[0].arn)
+  log_group_retention     = try(var.deployment.log_group.retention_in_days, null)
+  log_group_kms_key       = try(var.deployment.log_group.kms_key_arn, null)
+  create_log_group_policy = var.deployment.log_group.name != "" || local.create_log_group
+}
+
+resource "aws_cloudwatch_log_group" "deploy" {
+  count = local.create_log_group ? 1 : 0
+
+  name              = local.log_group_name
+  retention_in_days = local.log_group_retention
+  kms_key_id        = local.log_group_kms_key
+
+  tags = var.tags
+}
+
+data "aws_cloudwatch_log_group" "deploy" {
+  count = local.create_log_group ? 0 : 1
+
+  name = var.deployment.log_group.name
+}
+
+locals {
+  cloudwatch_config = templatefile("${path.module}/templates/cloudwatch.json",
+    {
+      data_mountpoint = local.storage.data.mount_point
+      log_group_name  = local.log_group_name
+    }
+  )
+}
+
+resource "aws_ssm_parameter" "cloudwatch_config" {
+  name        = "/${var.name_prefix}/ec2/cloudwatch.json"
+  description = "Cloudwatch agent configuration"
+  type        = "SecureString"
+  value       = local.cloudwatch_config
+
+  tags = var.tags
+}
+
 #### SSM DOCUMENT
 resource "aws_ssm_document" "deploy" {
   name            = "RunDeploy"
@@ -563,8 +582,20 @@ resource "aws_ssm_document" "deploy" {
 schemaVersion: "2.2"
 description: "Deploy code from git repo"
 parameters:
-  CommitHash:
-    description: "Optional Git commit hash to checkout (fallback to main if not set)"
+  GithubRefName:
+    description: "Git reference to checkout"
+    default: ""
+    type: String
+  GithubSha:
+    description: "Git commit hash"
+    default: ""
+    type: String
+  GithubWorkflow:
+    description: "Github workflow name"
+    default: ""
+    type: String
+  GithubRunNumber:
+    description: "Github workflow build number"
     default: ""
     type: String
   ComposeOverrides:
@@ -572,12 +603,15 @@ parameters:
     default: ""
     type: String
 mainSteps:
-  - action: "aws:runScript"
+  - action: "aws:runShellScript"
     name: "RunDeploy"
     inputs:
       runCommand:
         - |
-          export COMMIT_HASH={{ CommitHash }}
+          export GITHUB_REF_NAME={{ GithubRefName }}
+          export GITHUB_SHA={{ GithubSha }}
+          export GITHUB_WORKFLOW={{ GithubWorkflow }}
+          export GITHUB_RUN_NUMBER={{ GithubRunNumber }}
           export COMPOSE_OVERRIDES="{{ ComposeOverrides }}"
           /opt/scripts/deploy-app-in-docker.sh
       cloudWatchLogGroupName: "${local.log_group_name}"
