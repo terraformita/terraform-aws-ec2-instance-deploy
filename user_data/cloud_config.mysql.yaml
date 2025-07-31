@@ -728,4 +728,4 @@ runcmd:
   - systemctl daemon-reload
   - systemctl enable --now --no-block mysql-backup.timer
   # deploy application
-  - /opt/scripts/deploy-app-in-docker.sh
+  #- /opt/scripts/deploy-app-in-docker.sh
