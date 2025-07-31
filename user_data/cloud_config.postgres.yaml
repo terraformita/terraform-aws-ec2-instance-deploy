@@ -631,10 +631,10 @@ write_files:
       }
 
       sync_sources() {
-        # Clone repo if WORKDIR is not a valid git repo
-        git -C "$WORKDIR" rev-parse 2>/dev/null || git clone "$GIT_REPOSITORY" "$WORKDIR"
+        # clone repo if WORKDIR is not a valid git repo
+        git -C $WORKDIR rev-parse 2>/dev/null || git clone $GIT_REPOSITORY $WORKDIR
 
-        cd "$WORKDIR"
+        cd $WORKDIR
 
         # Fetch all remote refs and clean up deleted branches
         git fetch --all --prune
@@ -770,4 +770,5 @@ runcmd:
   - systemctl daemon-reload
   - systemctl enable --now --no-block postgresql-backup.timer
   # deploy application
+  # disabled to speed up instance start
   #- /opt/scripts/deploy-app-in-docker.sh
