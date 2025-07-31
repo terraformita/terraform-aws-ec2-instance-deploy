@@ -46,3 +46,13 @@ output "ec2_env_file_auto_ssm_parameter" {
   description = "SSM parameter name containing auto-generated environment variables."
   value       = aws_ssm_parameter.ec2_env_file_auto.name
 }
+
+output "deploy_log_group" {
+  description = "CloudWatch log group for SSM document execution."
+  value = {
+    name              = try(aws_cloudwatch_log_group.deploy[0].name, data.aws_cloudwatch_log_group.deploy[0].name)
+    arn               = try(aws_cloudwatch_log_group.deploy[0].arn, data.aws_cloudwatch_log_group.deploy[0].arn)
+    retention_in_days = try(aws_cloudwatch_log_group.deploy[0].retention_in_days, data.aws_cloudwatch_log_group.deploy[0].retention_in_days)
+    kms_key_id        = try(aws_cloudwatch_log_group.deploy[0].kms_key_id, data.aws_cloudwatch_log_group.deploy[0].kms_key_id)
+  }
+}

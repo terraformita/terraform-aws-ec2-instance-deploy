@@ -53,12 +53,19 @@ variable "deployment" {
     domain_name       = optional(string, "")
     ssl_email         = optional(string, "")
     compose_overrides = optional(string, "")
+    log_group = optional(object({
+      name              = optional(string, "")
+      retention_in_days = optional(number, 30)
+      encrypted         = optional(bool, true)
+      kms_key_arn       = optional(string, "")
+    }), {})
   })
   default = {
     enabled           = false
     git_repository    = ""
     default_branch    = "main"
     compose_overrides = ""
+    log_group         = {}
   }
 }
 

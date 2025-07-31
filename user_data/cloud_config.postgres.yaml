@@ -33,8 +33,7 @@ packages:
   - jq
   - htop
   - docker
-  - cronie
-  - pv
+  - amazon-cloudwatch-agent
 
 write_files:
   - path: /opt/scripts/ebs-mount.sh
@@ -95,6 +94,24 @@ write_files:
     content: |
       #!/usr/bin/env bash
       set -eu -o pipefail
+
+      # configure docker daemon
+      docker_config=$(cat <<EOF
+      {
+        "features": {
+          "containerd-snapshotter": true
+        },
+        "builder": {
+          "gc": {
+            "enabled": true,
+            "defaultKeepStorage": "15GB"
+          }
+        }
+      }
+      EOF
+      )
+      echo "$docker_config" > /etc/docker/daemon.json
+      service docker restart
 
       # install old docker-compose
       yum install -y libxcrypt-compat
@@ -586,10 +603,23 @@ write_files:
       #!/usr/bin/env bash
       set -euo pipefail
 
-      WORKDIR=$${WORKDIR:-/srv/code}
+      WORKDIR=$${WORKDIR:-${data_mountpoint}/code}
       GIT_REPOSITORY=$${GIT_REPOSITORY:-${git_repository}}
-      DEFAULT_BRANCH=$${DEFAULT_BRANCH:-${default_branch}}
       COMPOSE_OVERRIDES=$${COMPOSE_OVERRIDES:-${compose_overrides}}
+
+      GITHUB_REF_NAME="$${BRANCH:-$${GITHUB_REF_NAME:-main}}"
+      GITHUB_SHA="$${COMMIT:-$${GITHUB_SHA:-}}"
+      GITHUB_WORKFLOW=$${GITHUB_WORKFLOW:-manual}
+      GITHUB_RUN_NUMBER=$${GITHUB_RUN_NUMBER:-$(date +%F_%H-%M-%S)}
+
+      # configure cloudwatch function
+      ENABLE_CLOUDWATCH=$${ENABLE_CLOUDWATCH:-true}
+      CW_STREAM_NAME=$GITHUB_WORKFLOW/$GITHUB_REF_NAME/$GITHUB_RUN_NUMBER
+      CW_STREAM_NAME_SANITIZED=$(sed -E 's/[^a-zA-Z0-9_-]/_/g' <<<"$CW_STREAM_NAME")
+      CW_CFG_PATH=${data_mountpoint}/cloudwatch/cloudwatch.json
+      CW_LOG_PATH=${data_mountpoint}/logs/$CW_STREAM_NAME_SANITIZED.log
+      CW_AGENT_BIN=/opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl
+      CW_CFG_TEMPLATE=$(/opt/scripts/get-cloudwatch-config.sh)
 
       setup_ssh_config() {
         local repo_deploy_key=$(aws ssm get-parameter --name "${ssm_repo_deploy_key}" --with-decryption --query 'Parameter.Value' --output text)
@@ -606,18 +636,30 @@ write_files:
 
         cd $WORKDIR
 
-        # always hard reset and clean before any checkout to avoid checkout errors
+        # Fetch all remote refs and clean up deleted branches
+        git fetch --all --prune
+
+        # Checkout remote branch or tag
+        if git show-ref --verify "refs/remotes/origin/$GITHUB_REF_NAME"; then
+          git checkout -B "$GITHUB_REF_NAME" "origin/$GITHUB_REF_NAME"
+        elif git show-ref --tags | grep -q "refs/tags/$GITHUB_REF_NAME"; then
+          git checkout "tags/$GITHUB_REF_NAME"
+        fi
+
+        # Delete all local branches except the current one
+        local branches_count=$(git branch | wc -l)
+        if [[ $branches_count -gt 1 ]]; then
+          git branch | grep -v '^\*' | xargs -r git branch -D
+        fi
+
+        # Reset working directory to clean state
         git reset --hard
-        git clean -fd
+        git clean -xfd
 
-        git fetch --all
-
-        # determine commit/branch to reset to
-        COMMIT="origin/$DEFAULT_BRANCH"
-        [[ -n "$${COMMIT_HASH:-}" ]] && COMMIT="$COMMIT_HASH"
-
-        # force reset working tree and index to exact commit state
-        git reset --hard "$COMMIT"
+        # Reset to specific commit if provided
+        if [[ -n $GITHUB_SHA ]]; then
+          git reset --hard "$GITHUB_SHA"
+        fi
       }
 
       configure_host() {
@@ -650,12 +692,41 @@ write_files:
       }
 
       run_docker() {
-        docker system prune -f
         docker compose pull --ignore-pull-failures -q
         docker compose build -q
         docker compose up -d
       }
 
+      setup_cloudwatch() {
+        [[ $ENABLE_CLOUDWATCH == true ]] || return 0
+
+        if [[ ! -f "$CW_AGENT_BIN" ]]; then
+          echo "[WARN] CloudWatch agent binary not found at $CW_AGENT_BIN, skipping setup"
+          return 0
+        fi
+
+        mkdir -p $(dirname $CW_CFG_PATH $CW_LOG_PATH | xargs)
+        jq \
+          --arg log_stream_name "$CW_STREAM_NAME" \
+          '.logs.logs_collected.files.collect_list[0] += {
+            log_stream_name: $log_stream_name
+          }' <<<"$CW_CFG_TEMPLATE" > $CW_CFG_PATH
+
+        # delete old log files
+        local log_dir=$(dirname $CW_LOG_PATH)
+        [[ -d $log_dir ]] && rm -f $log_dir/*
+
+        # Redirect stdout/stderr to log file
+        exec > >( tee -a "$CW_LOG_PATH" )
+        exec 2>&1
+        $CW_AGENT_BIN \
+          -a fetch-config \
+          -m ec2 \
+          -c file:"$CW_CFG_PATH" \
+          -s
+      }
+
+      setup_cloudwatch
       setup_ssh_config
       sync_sources
       configure_host
@@ -663,9 +734,25 @@ write_files:
       prepare_docker_overrides
       setup_env_file
       run_docker
+  - path: /opt/scripts/get-cloudwatch-config.sh
+    permissions: '0700'
+    content: |
+      #!/usr/bin/env bash
+      set -euo pipefail
+      SSM_PARAM=${ssm_cloudwatch_config}
+      aws ssm get-parameter \
+        --name "$SSM_PARAM" \
+        --with-decryption \
+        --query 'Parameter.Value' \
+        --output text
 runcmd:
   # install aws ssm agent
   - yum install -y https://s3.amazonaws.com/ec2-downloads-windows/SSMAgent/latest/linux_amd64/amazon-ssm-agent.rpm
+  - |
+    jq --arg CommandWorkersLimit 1 '
+      .Mds += { CommandWorkersLimit: ($CommandWorkersLimit | tonumber) } |
+      .Agent.SelfUpdate = true
+    ' /etc/amazon/ssm/amazon-ssm-agent.json.template > /etc/amazon/ssm/amazon-ssm-agent.json
   - systemctl enable --now --no-block amazon-ssm-agent
   # dist-upgrade
   - dnf upgrade -y --refresh --releasever=latest
@@ -683,4 +770,5 @@ runcmd:
   - systemctl daemon-reload
   - systemctl enable --now --no-block postgresql-backup.timer
   # deploy application
-  - /opt/scripts/deploy-app-in-docker.sh
+  # disabled to speed up instance start
+  #- /opt/scripts/deploy-app-in-docker.sh

@@ -82,6 +82,7 @@ locals {
   db_credentials = format("%s://%s:%s@%s:%s/%s", local.service_name, local.database.username, local.database.password, local.database.host, local.database.port, local.database.name)
 }
 
+#### EBS
 resource "aws_ebs_volume" "data" {
   availability_zone = var.vpc_config.availability_zone
   size              = local.storage.data.size_gb
@@ -118,6 +119,7 @@ resource "aws_ebs_volume" "backup_tmp" {
   )
 }
 
+#### KEYPAIR
 module "key_pair" {
   source  = "terraform-aws-modules/key-pair/aws"
   version = "2.0.3"
@@ -126,6 +128,7 @@ module "key_pair" {
   create_private_key = true
 }
 
+#### SECURITY GROUP
 module "sg" {
   source  = "terraform-aws-modules/security-group/aws"
   version = "5.2.0"
@@ -182,6 +185,7 @@ resource "random_password" "db_admin" {
   }
 }
 
+#### TLS
 resource "tls_private_key" "ca" {
   count = var.ssl_config.enabled && var.ssl_config.generate_self_signed ? 1 : 0
 
@@ -264,6 +268,7 @@ locals {
   ssl_certs = var.ssl_config.enabled && var.ssl_config.generate_self_signed ? zipmap(local.ssl_certs_keys, local.ssl_certs_values) : {}
 }
 
+#### SSM PARAMETERS
 resource "aws_ssm_parameter" "ssl_certs" {
   for_each = local.ssl_certs
 
@@ -331,6 +336,7 @@ EOF
   tags = var.tags
 }
 
+#### IAM
 locals {
   ssm_params = concat(
     var.ssm_parameters.env_files,
@@ -412,6 +418,23 @@ data "aws_iam_policy_document" "ec2_instance_base" {
       resources = ["arn:aws:s3:::${var.backup.s3_bucket}/*"]
     }
   }
+
+  dynamic "statement" {
+    for_each = local.create_log_group_policy ? [1] : []
+    content {
+      sid    = "CloudWatchLogsAccess"
+      effect = "Allow"
+      actions = [
+        "logs:CreateLogStream",
+        "logs:PutLogEvents",
+        "logs:DescribeLogGroups",
+        "logs:DescribeLogStreams",
+        "logs:GetLogEvents",
+        "logs:FilterLogEvents"
+      ]
+      resources = ["${local.log_group_arn}:*"]
+    }
+  }
 }
 
 data "aws_iam_policy_document" "ec2_instance" {
@@ -427,35 +450,7 @@ resource "aws_iam_policy" "ec2_instance" {
   policy      = data.aws_iam_policy_document.ec2_instance.json
 }
 
-resource "aws_ssm_document" "deploy" {
-  name            = "RunDeploy"
-  document_type   = "Command"
-  document_format = "YAML"
-
-  content = <<EOF
-schemaVersion: "2.2"
-description: "Deploy code from git repo"
-parameters:
-  CommitHash:
-    description: "Optional Git commit hash to checkout (fallback to main if not set)"
-    default: ""
-    type: String
-  ComposeOverrides:
-    description: "These docker compose override files were be used to build docker-compose.override.yml"
-    default: ""
-    type: String
-mainSteps:
-  - action: "aws:runShellScript"
-    name: "RunDeploy"
-    inputs:
-      runCommand:
-        - |
-          export COMMIT_HASH={{ CommitHash }}
-          export COMPOSE_OVERRIDES="{{ ComposeOverrides }}"
-          /opt/scripts/deploy-app-in-docker.sh
-EOF
-}
-
+#### EC2 INSTANCE
 locals {
   cloud_init = base64gzip(
     templatefile("${path.module}/user_data/cloud_config.${var.database.engine}.yaml",
@@ -478,11 +473,12 @@ locals {
         db_backup_user     = local.service_name
         db_port            = local.db_port
 
-        git_repository      = var.deployment.git_repository
-        default_branch      = var.deployment.default_branch
-        ssm_repo_deploy_key = var.ssm_parameters.repo_deploy_key
-        ssm_env_files       = join(" ", concat(var.ssm_parameters.env_files, [aws_ssm_parameter.ec2_env_file_auto.name]))
-        compose_overrides   = var.deployment.compose_overrides
+        git_repository        = var.deployment.git_repository
+        default_branch        = var.deployment.default_branch
+        ssm_repo_deploy_key   = var.ssm_parameters.repo_deploy_key
+        ssm_cloudwatch_config = aws_ssm_parameter.cloudwatch_config.name
+        ssm_env_files         = join(" ", concat(var.ssm_parameters.env_files, [aws_ssm_parameter.ec2_env_file_auto.name]))
+        compose_overrides     = var.deployment.compose_overrides
 
         ssl_certs            = var.ssl_config.enabled ? join(" ", local.ssl_certs_keys) : ""
         ssl_certs_ssm_prefix = "/${var.name_prefix}/ec2"
@@ -529,4 +525,96 @@ module "ec2_instance" {
   user_data_base64 = local.cloud_init
 
   tags = local.ec2_instance_tags
+}
+
+#### CLOUDWATCH LOG GROUP
+# Log group configuration
+locals {
+  create_log_group        = var.deployment.log_group.name == ""
+  log_group_name          = var.deployment.log_group.name != "" ? var.deployment.log_group.name : "${var.name_prefix}-ec2-deploy"
+  log_group_arn           = try(aws_cloudwatch_log_group.deploy[0].arn, data.aws_cloudwatch_log_group.deploy[0].arn)
+  log_group_retention     = try(var.deployment.log_group.retention_in_days, null)
+  log_group_kms_key       = try(var.deployment.log_group.kms_key_arn, null)
+  create_log_group_policy = var.deployment.log_group.name != "" || local.create_log_group
+}
+
+resource "aws_cloudwatch_log_group" "deploy" {
+  count = local.create_log_group ? 1 : 0
+
+  name              = local.log_group_name
+  retention_in_days = local.log_group_retention
+  kms_key_id        = local.log_group_kms_key
+
+  tags = var.tags
+}
+
+data "aws_cloudwatch_log_group" "deploy" {
+  count = local.create_log_group ? 0 : 1
+
+  name = var.deployment.log_group.name
+}
+
+locals {
+  cloudwatch_config = templatefile("${path.module}/templates/cloudwatch.json",
+    {
+      data_mountpoint = local.storage.data.mount_point
+      log_group_name  = local.log_group_name
+    }
+  )
+}
+
+resource "aws_ssm_parameter" "cloudwatch_config" {
+  name        = "/${var.name_prefix}/ec2/cloudwatch.json"
+  description = "Cloudwatch agent configuration"
+  type        = "SecureString"
+  value       = local.cloudwatch_config
+
+  tags = var.tags
+}
+
+#### SSM DOCUMENT
+resource "aws_ssm_document" "deploy" {
+  name            = "RunDeploy"
+  document_type   = "Command"
+  document_format = "YAML"
+
+  content = <<EOF
+schemaVersion: "2.2"
+description: "Deploy code from git repo"
+parameters:
+  GithubRefName:
+    description: "Git reference to checkout"
+    default: ""
+    type: String
+  GithubSha:
+    description: "Git commit hash"
+    default: ""
+    type: String
+  GithubWorkflow:
+    description: "Github workflow name"
+    default: ""
+    type: String
+  GithubRunNumber:
+    description: "Github workflow build number"
+    default: ""
+    type: String
+  ComposeOverrides:
+    description: "These docker compose override files were be used to build docker-compose.override.yml"
+    default: ""
+    type: String
+mainSteps:
+  - action: "aws:runShellScript"
+    name: "RunDeploy"
+    inputs:
+      runCommand:
+        - |
+          export GITHUB_REF_NAME={{ GithubRefName }}
+          export GITHUB_SHA={{ GithubSha }}
+          export GITHUB_WORKFLOW={{ GithubWorkflow }}
+          export GITHUB_RUN_NUMBER={{ GithubRunNumber }}
+          export COMPOSE_OVERRIDES="{{ ComposeOverrides }}"
+          /opt/scripts/deploy-app-in-docker.sh
+      cloudWatchLogGroupName: "${local.log_group_name}"
+      cloudWatchOutputEnabled: "true"
+EOF
 }
