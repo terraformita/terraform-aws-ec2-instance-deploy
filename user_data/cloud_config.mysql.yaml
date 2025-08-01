@@ -34,6 +34,7 @@ packages:
   - htop
   - docker
   - amazon-cloudwatch-agent
+  - amazon-ecr-credential-helper
 
 write_files:
   - path: /opt/scripts/ebs-mount.sh
@@ -89,14 +90,15 @@ write_files:
           mount -o defaults -t ext4 $device_name $mountpoint && echo 'Successfully mounted a fresh disk'
       fi
       echo "$device_name $mountpoint ext4 defaults,nofail 0 2" | tee -a /etc/fstab
-  - path: /opt/scripts/get-docker-extras.sh
-    permissions: '0700'
+  - path: /root/.docker/config.json
+    permissions: '600'
     content: |
-      #!/usr/bin/env bash
-      set -eu -o pipefail
-
-      # configure docker daemon
-      docker_config=$(cat <<EOF
+      {
+        "credsStore": "ecr-login"
+      }
+  - path: /etc/docker/daemon.json
+    permissions: '644'
+    content: |
       {
         "features": {
           "containerd-snapshotter": true
@@ -104,14 +106,15 @@ write_files:
         "builder": {
           "gc": {
             "enabled": true,
-            "defaultKeepStorage": "15GB"
+            "defaultKeepStorage": "${docker_cache_size}GB"
           }
         }
       }
-      EOF
-      )
-      echo "$docker_config" > /etc/docker/daemon.json
-      service docker restart
+  - path: /opt/scripts/get-docker-extras.sh
+    permissions: '0700'
+    content: |
+      #!/usr/bin/env bash
+      set -eu -o pipefail
 
       # install old docker-compose
       yum install -y libxcrypt-compat
@@ -127,7 +130,6 @@ write_files:
       mkdir -p $plugins_dir
       curl -SL https://github.com/docker/compose/releases/download/v$version/docker-compose-$${os,,}-$arch -o $plugins_dir/docker-compose
       chmod +x $plugins_dir/docker-compose
-
   - path: /opt/scripts/mysql-initdb.sh
     permissions: '0700'
     content: |
@@ -625,7 +627,10 @@ write_files:
 
       prepare_docker_aws() {
         ECR_REGISTRY=$(aws ecr get-authorization-token --query authorizationData[0].proxyEndpoint --output text | cut -d/ -f3)
-        aws ecr get-login-password | docker login --username AWS --password-stdin $ECR_REGISTRY
+
+        if [[ -f /root/.docker/config.json ]] && ! grep -wq 'ecr-login' /root/.docker/config.json; then
+          aws ecr get-login-password | docker login --username AWS --password-stdin $ECR_REGISTRY
+        fi
       }
 
       prepare_docker_overrides() {

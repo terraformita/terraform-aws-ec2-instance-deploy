@@ -479,6 +479,7 @@ locals {
         ssm_cloudwatch_config = aws_ssm_parameter.cloudwatch_config.name
         ssm_env_files         = join(" ", concat(var.ssm_parameters.env_files, [aws_ssm_parameter.ec2_env_file_auto.name]))
         compose_overrides     = var.deployment.compose_overrides
+        docker_cache_size     = var.root_block_device.volume_size * var.docker.cache_size / 100
 
         ssl_certs            = var.ssl_config.enabled ? join(" ", local.ssl_certs_keys) : ""
         ssl_certs_ssm_prefix = "/${var.name_prefix}/ec2"

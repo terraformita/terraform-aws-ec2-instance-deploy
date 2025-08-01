@@ -151,3 +151,14 @@ variable "iam" {
     additional_policies = []
   }
 }
+
+variable "docker" {
+  description = "Docker daemon configuration."
+  type = object({
+    # percents from root volume size
+    cache_size = optional(number, 80)
+  })
+  default = {
+    cache_size = 80
+  }
+}
