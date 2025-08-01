@@ -61,3 +61,8 @@ output "storage" {
   description = "EC2 instance storage configuration."
   value       = local.storage
 }
+
+output "domain" {
+  description = "Deployment domain name."
+  value       = var.deployment.domain_name
+}
