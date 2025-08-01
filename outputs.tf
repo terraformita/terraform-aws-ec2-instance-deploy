@@ -56,3 +56,8 @@ output "deploy_log_group" {
     kms_key_id        = try(aws_cloudwatch_log_group.deploy[0].kms_key_id, data.aws_cloudwatch_log_group.deploy[0].kms_key_id)
   }
 }
+
+output "storage" {
+  description = "EC2 instance storage configuration."
+  value       = local.storage
+}
