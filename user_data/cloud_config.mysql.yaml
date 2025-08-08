@@ -561,6 +561,7 @@ write_files:
       WORKDIR=$${WORKDIR:-${data_mountpoint}/code}
       GIT_REPOSITORY=$${GIT_REPOSITORY:-${git_repository}}
       COMPOSE_OVERRIDES=$${COMPOSE_OVERRIDES:-${compose_overrides}}
+      GIT_CLEAN_EXCLUDE="$${CLEAN_EXCLUDE:-$${GIT_CLEAN_EXCLUDE:-${git_clean_exclude}}}"
 
       GITHUB_REF_NAME="$${BRANCH:-$${GITHUB_REF_NAME:-main}}"
       GITHUB_SHA="$${COMMIT:-$${GITHUB_SHA:-}}"
@@ -598,11 +599,15 @@ write_files:
         # Fetch all remote refs and clean up deleted branches
         git fetch --all --prune
 
-        # Checkout remote branch or tag
+        # Clean working directory before checkout
+        git reset --hard
+        git clean -xfd $(printf -- "-e %s " $GIT_CLEAN_EXCLUDE)
+
+        # Force checkout remote branch or tag (discards local changes)
         if git show-ref --verify "refs/remotes/origin/$GITHUB_REF_NAME"; then
           git checkout -B "$GITHUB_REF_NAME" "origin/$GITHUB_REF_NAME"
         elif git show-ref --tags | grep -q "refs/tags/$GITHUB_REF_NAME"; then
-          git checkout "tags/$GITHUB_REF_NAME"
+          git checkout "$GITHUB_REF_NAME"
         fi
 
         # Delete all local branches except the current one
@@ -610,10 +615,6 @@ write_files:
         if [[ $branches_count -gt 1 ]]; then
           git branch | grep -v '^\*' | xargs -r git branch -D
         fi
-
-        # Reset working directory to clean state
-        git reset --hard
-        git clean -xfd
 
         # Reset to specific commit if provided
         if [[ -n $GITHUB_SHA ]]; then
@@ -733,5 +734,4 @@ runcmd:
   - systemctl daemon-reload
   - systemctl enable --now --no-block mysql-backup.timer
   # deploy application
-  # disabled to speed up instance start
-  #- /opt/scripts/deploy-app-in-docker.sh
+  - /opt/scripts/deploy-app-in-docker.sh

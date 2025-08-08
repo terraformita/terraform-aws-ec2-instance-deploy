@@ -53,6 +53,7 @@ variable "deployment" {
     domain_name       = optional(string, "")
     ssl_email         = optional(string, "")
     compose_overrides = optional(string, "")
+    git_clean_exclude = optional(string, "")
     log_group = optional(object({
       name              = optional(string, "")
       retention_in_days = optional(number, 30)
